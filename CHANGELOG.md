@@ -165,4 +165,4 @@ human-readable concepts are reduced to `[u8; 32]` blake3 hashes.
   `overflow_returns_error`) are flagged as low-effort follow-ups in
   `docs/SECURITY.md` §11 — the defenses exist; only those two tests do not.
 
-[Unreleased]: https://github.com/ozone/stocksie/compare/HEAD
+[Unreleased]: https://github.com/napatsakornnut/stocksie/compare/HEAD

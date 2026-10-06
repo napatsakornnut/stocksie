@@ -25,8 +25,28 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { Html5Qrcode } from "html5-qrcode";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 import { Button } from "@/components/ui/Button";
+
+/**
+ * The decode formats to support. Restricted to retail-relevant formats
+ * so ZXing doesn't burn the per-frame decode budget trying formats that
+ * never appear on household products. Includes CODE_128 / CODE_39 / ITF
+ * because non-grocery items (cosmetics, supplements, electronics) often
+ * carry those instead of EAN/UPC — a too-narrow allow-list is a common
+ * reason a clear barcode never decodes.
+ */
+const FORMATS_TO_SUPPORT: Html5QrcodeSupportedFormats[] = [
+  Html5QrcodeSupportedFormats.QR_CODE,
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.UPC_EAN_EXTENSION,
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.ITF,
+];
 
 export type BarcodeScannerProps = {
   /**
@@ -140,27 +160,84 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
         return;
       }
 
+      // Verbose logging is intentionally enabled: the library logs every
+      // decode attempt and the per-frame ZXing/BarcodeDetector error to the
+      // console. This is the only way to see WHY a clear barcode isn't
+      // decoding — without it the scan loop fails silently. Open DevTools
+      // → Console while scanning to see what the decoder reports. Once
+      // scanning is reliably working this can be flipped back to false.
       const scanner = new Html5Qrcode(elementId, {
-        verbose: false,
-        // Disable the experimental BarcodeDetector path — it isn't available
-        // everywhere and the default ZXing-based decoder is reliable for
-        // EAN/UPC, which is what household essentials carry.
+        verbose: true,
+        formatsToSupport: FORMATS_TO_SUPPORT,
+        // Force the ZXing JS decoder. The default (`true`) prefers Chrome's
+        // native BarcodeDetector API, but that path has well-documented
+        // reliability gaps for 1D barcodes (EAN/UPC/CODE_128) on macOS
+        // Chrome/Safari — it silently returns no result for barcodes ZXing
+        // decodes fine. ZXing is slower per frame but reliably detects the
+        // formats in FORMATS_TO_SUPPORT.
         useBarCodeDetectorIfSupported: false,
       });
       scannerRef.current = scanner;
 
       await scanner.start(
-        // Prefer the back camera (household goods are scanned from the back
-        // camera on a phone). On a laptop with only a front webcam, the
-        // constraint resolves to whatever's available.
+        // Camera selection only. html5-qrcode validates that this object has
+        // EXACTLY 1 key, and only accepts `facingMode` or `deviceId` — passing
+        // width/height/resolution hints here throws
+        // "'cameraIdOrConfig' object should have exactly 1 key". Resolution
+        // constraints go in `videoConstraints` on the configuration object
+        // below; when present, the library uses it directly and ignores this
+        // argument's facingMode (so we duplicate facingMode into both spots).
         { facingMode: "environment" },
-        { fps: 10 },
+        {
+          // fps 5 gives ZXing ~200ms per frame to decode instead of the
+          // ~100ms budget at fps 10. The JS-only ZXing decoder (forced via
+          // useBarCodeDetectorIfSupported: false above) needs the extra
+          // headroom to avoid silently dropping frames.
+          fps: 5,
+          // 1D barcodes (EAN/UPC/CODE_128) have a canonical orientation —
+          // they are not symmetric under horizontal flip like QR codes are.
+          // The library's default behavior is to retry every failed decode
+          // with the frame mirrored, which doubles the per-frame work for
+          // zero benefit on 1D codes. Disabling flip halves decode time and
+          // lets the next real frame arrive sooner.
+          disableFlip: true,
+          // Full MediaStreamConstraints — when present the library hands
+          // this directly to getUserMedia (bypassing the facingMode selection
+          // above). Request the back camera AND a high-resolution stream:
+          // more pixels per barcode bar means ZXing can resolve the narrow
+          // guard bars on dense EAN-13s that blur together on a 640x480 feed.
+          videoConstraints: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          // Adaptive scan region. html5-qrcode silently disables the shaded
+          // region (and falls back to full-frame scanning) when qrbox.height
+          // exceeds the rendered video height, so this MUST scale to the
+          // actual viewfinder. Wide-and-short matches 1D barcode geometry.
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            // Width: fill most of the viewfinder, capped at 400 so the
+            // region doesn't grow unboundedly on a large desktop window.
+            const width = Math.max(50, Math.min(viewfinderWidth - 20, 400));
+            // Height: 1D barcodes are horizontal stripes — a short region
+            // matches their shape and avoids wasting decode budget on empty
+            // vertical space. Cap at 150px and at 60% of viewfinder height,
+            // whichever is smaller (the 60% guard guarantees the shaded
+            // region renders — see the height-mismatch note above).
+            const height = Math.max(
+              50,
+              Math.min(150, Math.floor(viewfinderHeight * 0.6))
+            );
+            return { width, height };
+          },
+        },
         (decodedText) => {
           // Lock against the library firing success repeatedly for the same
           // code in view. After the first decode, stop the camera and hand
           // the code up.
           if (scannedRef.current) return;
           scannedRef.current = true;
+          console.info("[stocksie-scan] decoded:", decodedText);
           // Stop first (releases the stream promptly), THEN call onScan so
           // the parent's state update doesn't race the camera teardown.
           scanner
@@ -175,13 +252,19 @@ export function BarcodeScanner({ onScan }: BarcodeScannerProps) {
               onScan(decodedText);
             });
         },
-        // Per-frame decode failures are normal (most frames have no code in
-        // view); ignore them so the console stays quiet.
-        () => {
-          /* per-frame non-decode — ignored */
-        }
+        // Per-frame decode failure. Logging this (throttled) so we can see
+        // what ZXing reports — previously this was silently swallowed, which
+        // made it impossible to tell whether the decoder was running,
+        // seeing garbage, or failing on an unsupported format. Once scanning
+        // is reliably working this callback can go back to a no-op.
+        createPerFrameErrorLogger()
       );
       setStatus({ kind: "scanning" });
+      // Log the geometry so we can verify the qrbox / video math is sane.
+      // If videoWidth/clientWidth is 0 or NaN, the drawImage source rect in
+      // foreverScan becomes garbage and ZXing decodes an empty canvas —
+      // this log surfaces that without needing a separate repro.
+      logScanGeometry(elementId);
     } catch (err) {
       // Most likely permission denied or hardware error. Map a few known
       // shapes to friendlier copy; otherwise surface the raw message.
@@ -327,4 +410,68 @@ function describeStartError(err: unknown): string {
     return "This browser doesn't expose a camera API. Type the barcode by hand below.";
   }
   return `Couldn't start the camera: ${raw}. You can still type a barcode by hand below.`;
+}
+
+// ---------------------------------------------------------------------------
+// Debug helpers — surface what ZXing is actually seeing / reporting.
+// These log to the console so a developer watching DevTools while a scan
+// fails can tell *why* it failed (empty canvas, wrong region, unsupported
+// format, focus blur, etc.) instead of guessing. All of this is safe to
+// delete once scanning is reliably working in production.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a per-frame error callback that throttles its logging to one line
+ * per second. ZXing fires this on every frame without a code (~5-10×/s) so
+ * unthrottled logging floods the console. The throttled version still shows
+ * the *type* of decode failure, which is the missing diagnostic.
+ */
+function createPerFrameErrorLogger(): (msg: string) => void {
+  let lastLogAt = 0;
+  let lastMsg = "";
+  return (msg: string) => {
+    const now = Date.now();
+    if (now - lastLogAt < 1000 && msg === lastMsg) return;
+    lastLogAt = now;
+    lastMsg = msg;
+    console.info("[stocksie-scan] per-frame decode failed:", msg);
+  };
+}
+
+/**
+ * Log the video element's geometry + the dimensions of the decode canvas.
+ * If `videoWidth`/`clientWidth` is 0 or NaN, the library's `foreverScan`
+ * computes invalid `drawImage` source rectangles and ZXing ends up decoding
+ * a blank canvas — which presents exactly as "the perf log shows decodes
+ * happening but no barcode is ever found."
+ */
+function logScanGeometry(elementId: string): void {
+  // The geometry isn't available until the video has loaded metadata, so
+  // defer one tick + give the stream time to spin up.
+  setTimeout(() => {
+    const container = document.getElementById(elementId);
+    if (!container) {
+      console.warn("[stocksie-scan] container not found:", elementId);
+      return;
+    }
+    const video = container.querySelector("video");
+    const canvas = container.querySelector("canvas");
+    console.info("[stocksie-scan] geometry:", {
+      container: {
+        clientWidth: container.clientWidth,
+        clientHeight: container.clientHeight,
+      },
+      video: video
+        ? {
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            clientWidth: video.clientWidth,
+            clientHeight: video.clientHeight,
+            readyState: video.readyState,
+            currentTime: video.currentTime,
+          }
+        : null,
+      canvas: canvas ? { width: canvas.width, height: canvas.height } : null,
+    });
+  }, 500);
 }

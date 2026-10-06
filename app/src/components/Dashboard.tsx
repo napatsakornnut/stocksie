@@ -62,6 +62,13 @@ export function Dashboard() {
             dashboard's First Load. */}
         <div className="flex items-center gap-2">
           <Link
+            href="/budget"
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-stone-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 text-sm font-medium text-stone-800 dark:text-slate-100 transition-colors hover:bg-stone-200 dark:hover:bg-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-400 dark:focus-visible:outline-slate-500"
+          >
+            <span aria-hidden="true">📊</span>
+            Budget
+          </Link>
+          <Link
             href="/shelf"
             className="inline-flex h-10 items-center gap-2 rounded-lg border border-stone-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 text-sm font-medium text-stone-800 dark:text-slate-100 transition-colors hover:bg-stone-200 dark:hover:bg-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-400 dark:focus-visible:outline-slate-500"
           >
@@ -91,7 +98,9 @@ export function Dashboard() {
               aria-hidden="true"
             />
             <span className="font-medium">Signed in</span>
-            <span className="text-emerald-600/60 dark:text-emerald-400/60">·</span>
+            <span className="text-emerald-600/60 dark:text-emerald-400/60">
+              ·
+            </span>
             <code className="font-mono text-[11px] text-emerald-700/80 dark:text-emerald-200/80">
               {shortAddr}
             </code>
@@ -132,8 +141,10 @@ export function Dashboard() {
         {connected && shortAddr ? (
           <p>
             You are signed in as{" "}
-            <code className="font-mono text-emerald-600 dark:text-emerald-400">{shortAddr}</code>.
-            Every action you take is approved by this account and recorded
+            <code className="font-mono text-emerald-600 dark:text-emerald-400">
+              {shortAddr}
+            </code>
+            . Every action you take is approved by this account and recorded
             against the household shown above.
           </p>
         ) : (
