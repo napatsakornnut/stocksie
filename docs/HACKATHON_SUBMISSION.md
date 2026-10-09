@@ -77,6 +77,16 @@ any OpenAI-compatible endpoint (env-swappable); prompts pin the model to a
 strict JSON contract that pure, unit-tested validators normalize before the
 UI ever renders it.
 
+4. **A modelless policy floor under the AI.** Before any draft is submitted it
+   is screened by a local, zero-weight decision engine
+   ([riir-reflex](https://reflex.gist.rs)) against the household's own rules
+   corpus (`corpus/household/*.md` — "staples under ฿300 are standing rules",
+   "anything over ฿500 goes to review"). It answers in microseconds,
+   bit-deterministically, offline, for free — and when the corpus can't ground
+   an answer it **abstains to human review**, which is stocksie's default
+   anyway. The stack is a three-tier safety cascade: **modelless rules floor →
+   LLM proposals → human on-chain signature.** No tier can move money alone.
+
 ## Solana Layer
 
 Solana is load-bearing, not decorative:
@@ -140,6 +150,9 @@ the repo — `docs/SECURITY.md`, `plan/`, `.plans/`.)
 - [ ] Submit the project on the Colosseum platform
 - [ ] Submit on https://superteam.fun/earn/listing/ai-solana-track/
 - [ ] Set `AI_API_KEY` (+ optional `AI_BASE_URL`/`AI_*_MODEL`) in `app/.env.local`
+- [ ] Optional policy gate: `brew install riir-reflex` then
+      `RIIR_REFLEX_CORPUS=corpus/household reflex` — drafts get the
+      "matches a household rule" badge; without it the app behaves identically
 - [ ] Deploy the program to devnet; point `NEXT_PUBLIC_RPC_ENDPOINT` at devnet
 - [ ] Record 2–3 min demo video: receipt photo → drafts → submit → owner
       approves → reimburse; plus a Thai chat proposal

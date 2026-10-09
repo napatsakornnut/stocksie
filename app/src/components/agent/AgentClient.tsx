@@ -43,6 +43,10 @@ import {
   type ParsedItem,
   type HouseholdContext,
 } from "@/lib/ai";
+import {
+  type PolicyVerdict,
+  type PolicyDraft,
+} from "@/lib/policy";
 import { statusFromAnchor, STATUS_LABELS, type Status } from "@/lib/types";
 import { SectionCard } from "@/components/budget/SectionCard";
 import { Field } from "@/components/ui/Field";
@@ -113,6 +117,46 @@ async function callAgent(body: unknown): Promise<AgentApiResponse> {
   } catch {
     return { ok: false, error: "Could not reach the AI endpoint." };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Policy gate (plan 006) — modelless Reflex check against household rules
+// ---------------------------------------------------------------------------
+
+interface PolicyApiResponse {
+  ok?: boolean;
+  available: boolean;
+  results: { key: string; verdict: PolicyVerdict }[];
+}
+
+/** Ask the local Reflex engine which drafts match a standing household rule. */
+async function callPolicy(
+  drafts: PolicyDraft[],
+  context: { vaultBalanceSol: string; pendingRequestCount: number }
+): Promise<PolicyApiResponse> {
+  try {
+    const res = await fetch("/api/policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drafts, context }),
+    });
+    const json = (await res.json().catch(() => null)) as
+      | (PolicyApiResponse & Record<string, unknown>)
+      | null;
+    if (!res.ok || !json || json.ok !== true) {
+      return { available: false, results: [] };
+    }
+    return json;
+  } catch {
+    return { available: false, results: [] };
+  }
+}
+
+/** Short row badge for a policy verdict; `null` → show nothing. */
+function policyBadgeLabel(verdict: PolicyVerdict): string {
+  return verdict.verdict === "covered"
+    ? "✓ matches a household rule"
+    : "no rule match — manual review";
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +250,60 @@ function AgentWorkspace({ solMinorPerUnit }: { solMinorPerUnit: number }) {
 
   const [drafts, setDrafts] = useState<DraftRow[]>([]);
   const [chat, setChat] = useState<ChatBubble[]>([]);
+  // Reflex policy verdicts per draft key (plan 006). Absent = unchecked or
+  // engine unavailable — never a gate, purely an annotation.
+  const [verdicts, setVerdicts] = useState<Record<string, PolicyVerdict>>({});
+
+  // Read-only household snapshot shared by the chat grounding and the policy
+  // gate — computed once here so both consumers see identical numbers.
+  const householdSnapshot = useMemo(() => {
+    const hh = householdData?.data?.household ?? null;
+    const requests = householdData?.data?.requests ?? [];
+    const pending = requests.filter(
+      (r) => statusFromAnchor(r.account.status) === "pending"
+    ).length;
+    const recent = requests.slice(-5).map((r) => {
+      const status = statusFromAnchor(r.account.status) as Status | null;
+      return `#${r.account.requestId.toString(10)} ${
+        status ? STATUS_LABELS[status] : "unknown"
+      } for ${lamportsToSol(r.account.amountLamports.toString(10))} SOL`;
+    });
+    return {
+      forAi: {
+        vaultBalanceSol: hh
+          ? lamportsToSol(hh.vaultBalance.toString(10))
+          : "unknown",
+        pendingRequestCount: pending,
+        memberCount: hh?.memberCount ?? 0,
+        recentRequests: recent,
+      } satisfies HouseholdContext,
+      forPolicy: {
+        vaultBalanceSol: hh
+          ? lamportsToSol(hh.vaultBalance.toString(10))
+          : "unknown",
+        pendingRequestCount: pending,
+      },
+    };
+  }, [householdData]);
+
+  /** Ask the Reflex policy gate about the given rows; stores verdicts. */
+  const runPolicyCheck = (rows: DraftRow[]) => {
+    if (rows.length === 0) return;
+    const payload: PolicyDraft[] = rows.map((row) => ({
+      key: row.key,
+      itemText: row.itemText,
+      amountSol: row.amountInput,
+      unitCostText: row.unitCostText,
+    }));
+    void callPolicy(payload, householdSnapshot.forPolicy).then((res) => {
+      if (!res.available) return;
+      setVerdicts((prev) => {
+        const next = { ...prev };
+        for (const { key, verdict } of res.results) next[key] = verdict;
+        return next;
+      });
+    });
+  };
 
   const addItems = (
     items: ParsedItem[],
@@ -216,6 +314,8 @@ function AgentWorkspace({ solMinorPerUnit }: { solMinorPerUnit: number }) {
       rowFromItem(item, currency, solMinorPerUnit, drafts.length + i, source)
     );
     setDrafts((prev) => [...prev, ...rows]);
+    // Policy check is an annotation, not a gate — fire and forget.
+    runPolicyCheck(rows);
     return rows.length;
   };
 
@@ -224,7 +324,7 @@ function AgentWorkspace({ solMinorPerUnit }: { solMinorPerUnit: number }) {
       <ChatSection
         chat={chat}
         setChat={setChat}
-        householdData={householdData.data}
+        householdSnapshot={householdSnapshot.forAi}
         addItems={addItems}
       />
       <ReceiptSection
@@ -233,6 +333,8 @@ function AgentWorkspace({ solMinorPerUnit }: { solMinorPerUnit: number }) {
       <DraftsTray
         drafts={drafts}
         setDrafts={setDrafts}
+        verdicts={verdicts}
+        onPolicyCheck={() => runPolicyCheck(drafts)}
         household={household}
         connectedWallet={connectedWallet}
         callerMember={callerMember}
@@ -266,12 +368,13 @@ function rowFromItem(
 function ChatSection({
   chat,
   setChat,
-  householdData,
+  householdSnapshot,
   addItems,
 }: {
   chat: ChatBubble[];
   setChat: React.Dispatch<React.SetStateAction<ChatBubble[]>>;
-  householdData: ReturnType<typeof useHousehold>["data"];
+  /** Read-only on-chain snapshot attached to every chat request (grounding). */
+  householdSnapshot: HouseholdContext;
   addItems: (
     items: ParsedItem[],
     currency: string,
@@ -287,25 +390,6 @@ function ChatSection({
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [chat, busy]);
 
-  const context: HouseholdContext = useMemo(() => {
-    const hh = householdData?.household ?? null;
-    const pending = (householdData?.requests ?? []).filter(
-      (r) => statusFromAnchor(r.account.status) === "pending"
-    ).length;
-    const recent = (householdData?.requests ?? []).slice(-5).map((r) => {
-      const status = statusFromAnchor(r.account.status) as Status | null;
-      return `#${r.account.requestId.toString(10)} ${
-        status ? STATUS_LABELS[status] : "unknown"
-      } for ${lamportsToSol(r.account.amountLamports.toString(10))} SOL`;
-    });
-    return {
-      vaultBalanceSol: hh ? lamportsToSol(hh.vaultBalance.toString(10)) : "unknown",
-      pendingRequestCount: pending,
-      memberCount: hh?.memberCount ?? 0,
-      recentRequests: recent,
-    };
-  }, [householdData]);
-
   const send = async () => {
     const text = input.trim();
     if (text.length === 0 || busy) return;
@@ -313,7 +397,7 @@ function ChatSection({
     setInput("");
     setChat((prev) => [...prev, { role: "user", text }]);
     setBusy(true);
-    const res = await callAgent({ mode: "chat", text, context });
+    const res = await callAgent({ mode: "chat", text, context: householdSnapshot });
     setBusy(false);
     if (!res.ok) {
       setError(res.error);
@@ -534,12 +618,18 @@ function ReceiptSection({
 function DraftsTray({
   drafts,
   setDrafts,
+  verdicts,
+  onPolicyCheck,
   household,
   connectedWallet,
   callerMember,
 }: {
   drafts: DraftRow[];
   setDrafts: React.Dispatch<React.SetStateAction<DraftRow[]>>;
+  /** Reflex policy verdicts keyed by draft key (absent = unchecked). */
+  verdicts: Record<string, PolicyVerdict>;
+  /** Re-run the household-rules check over the current drafts. */
+  onPolicyCheck: () => void;
   household: PublicKey | null;
   connectedWallet: PublicKey | null;
   callerMember: PublicKey | null;
@@ -647,14 +737,28 @@ function DraftsTray({
               key={row.key}
               className="grid gap-2 rounded-lg border border-stone-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950/40 sm:grid-cols-[auto_2fr_2fr_1fr_auto]"
             >
-              <label className="flex items-center">
+              <div className="flex flex-col items-start gap-1">
                 <input
                   type="checkbox"
                   checked={row.selected}
                   onChange={(e) => patch(row.key, { selected: e.target.checked })}
                   className="h-4 w-4 accent-violet-600"
                 />
-              </label>
+                {verdicts[row.key] && (
+                  <span
+                    title={`confidence ${verdicts[row.key].confidence.toFixed(2)} · ${
+                      verdicts[row.key].routing || "reflex"
+                    }`}
+                    className={
+                      verdicts[row.key].verdict === "covered"
+                        ? "rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                        : "rounded-full bg-stone-100 px-2 py-0.5 text-[10px] text-stone-500 dark:bg-slate-800 dark:text-slate-400"
+                    }
+                  >
+                    {policyBadgeLabel(verdicts[row.key])}
+                  </span>
+                )}
+              </div>
               <Field
                 label="Item / quantity"
                 value={row.itemText}
@@ -705,13 +809,19 @@ function DraftsTray({
           </span>
         )}
         {drafts.length > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setDrafts((prev) => prev.map((r) => ({ ...r, selected: true })))}
-          >
-            Select all
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setDrafts((prev) => prev.map((r) => ({ ...r, selected: true })))}
+            >
+              Select all
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onPolicyCheck}>
+              <span aria-hidden="true">📋</span>
+              Check household rules
+            </Button>
+          </>
         )}
       </div>
       <ResultBanner
