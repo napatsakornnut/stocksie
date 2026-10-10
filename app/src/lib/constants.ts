@@ -23,15 +23,16 @@ export const RPC_ENDPOINT: string =
  *
  * `@solana/web3.js` derives the WS URL by default as `ws://<host>:<rpcPort+1>/`
  * — the legacy `solana-test-validator` convention (RPC on 8899, WS on 8900).
- * Surfnet uses a different offset: RPC on 8899, WS on **8890** (one below, not
- * one above). The derived `ws://127.0.0.1:8900/` connects to nothing and the
- * wallet adapter logs `ws error: undefined` on every subscription; pinning
- * `wsEndpoint` to 8890 fixes it. Override via `NEXT_PUBLIC_RPC_WS_ENDPOINT`
- * for non-default deployments.
+ * Current surfpool follows that same convention (verified: `surfpool start`
+ * binds WS on 8900 and answers the upgrade handshake; older surfnet builds
+ * pinned it to 8890). The derived default already matches, but the explicit
+ * pin keeps subscriptions alive when RPC runs on a non-standard port, and an
+ * unreachable WS silently breaks every `rpc()` confirmation (30s timeouts
+ * while the transaction itself landed).
  */
 const envWs = process.env.NEXT_PUBLIC_RPC_WS_ENDPOINT;
 export const RPC_WS_ENDPOINT: string =
-  envWs && envWs.trim().length > 0 ? envWs.trim() : "ws://127.0.0.1:8890";
+  envWs && envWs.trim().length > 0 ? envWs.trim() : "ws://127.0.0.1:8900";
 
 export const RPC_COMMITMENT: Commitment = envCommitment ?? "confirmed";
 
