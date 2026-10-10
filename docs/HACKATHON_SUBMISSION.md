@@ -158,5 +158,9 @@ the repo — `docs/SECURITY.md`, `plan/`, `.plans/`.)
       `docs/DEPLOY_DEVNET.md`; IDL account still to init)
 - [ ] Record 2–3 min demo video: receipt photo → drafts → submit → owner
       approves → reimburse; plus a Thai chat proposal
-- [ ] Public GitHub repo visible to judges (transferred org:
-      `napatsakornnut/stocksie`)
+- [x] Public GitHub repo visible to judges (transferred org:
+      `napatsakornnut/stocksie`) — pushed through `b0e3572` on 2026-10-10
+- [ ] Hosted UI link for judges — Vercel import + env vars per
+      `docs/DEPLOY_VERCEL.md`, then paste the URL here: ___________
+- [ ] IDL account on devnet (explorer polish, optional):
+      `anchor idl init …` in `docs/DEPLOY_DEVNET.md` §2
