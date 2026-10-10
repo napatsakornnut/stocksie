@@ -37,6 +37,17 @@ let skipped = 0;
 
 for (const artifact of artifacts) {
   if (!existsSync(artifact.source)) {
+    // Git hosts (Vercel/Netlify/…) build from a checkout without `target/`
+    // (it's gitignored). The committed artifacts under `app/` are then the
+    // source of truth — skipping is safe as long as they exist.
+    if (existsSync(artifact.destination)) {
+      console.warn(
+        `[copy-idl] SKIP ${artifact.description} (no local \`target/\` — ` +
+          `using the committed artifact at ${artifact.destination})`,
+      );
+      skipped += 1;
+      continue;
+    }
     console.warn(
       `[copy-idl] SKIP ${artifact.description}\n` +
         `  source not found: ${artifact.source}\n` +
@@ -55,13 +66,18 @@ for (const artifact of artifacts) {
 }
 
 if (skipped > 0) {
+  const fatal = artifacts.some(
+    (a) => !existsSync(a.source) && !existsSync(a.destination)
+  );
   console.warn(
     `[copy-idl] completed with ${copied} copied, ${skipped} skipped. ` +
-      `Type-checking or building against a missing artifact will fail.`,
+      `Type-checking or building against a missing artifact will fail.`
   );
-  // Exit non-zero so `next build` / `tsc` chained after this surface the gap
-  // rather than silently building a broken client.
-  process.exit(1);
+  // Exit non-zero only when there is nothing to build against at all — a
+  // checkout with committed artifacts must still build on git hosts.
+  if (fatal) {
+    process.exit(1);
+  }
 }
 
 console.log(`[copy-idl] done (${copied} artifact${copied === 1 ? '' : 's'}).`);
