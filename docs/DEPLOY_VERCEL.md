@@ -3,6 +3,26 @@
 The program is already live on devnet (`At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj`).
 This puts the UI on a public URL pointed at it. ~10 minutes, free tier is enough.
 
+**Two paths to get there:**
+
+- **Dashboard + GitHub** (§1–3): needs the GitHub account that owns the repo
+  to install the Vercel GitHub App — after the ownership transfer that's
+  `napatsakornnut`.
+- **CLI, no GitHub** (used for the live site): the repo owner after the
+  transfer can't be required for hosting, so the site was deployed straight
+  from a local checkout:
+
+  ```sh
+  npx vercel login              # once — any Vercel account
+  cd app && npx vercel link --yes --project=stocksie-th
+  # add the env vars from the table below:
+  #   printf '%s' "<value>" | npx vercel env add <KEY> production
+  npx vercel --prod             # → https://stocksie-th.vercel.app
+  ```
+
+  CLI deploys are standalone (no git integration); re-run `npx vercel --prod`
+  to ship updates.
+
 ## 1. Import the repo
 
 1. <https://vercel.com/new> → import **napatsakornnut/stocksie** (GitHub).

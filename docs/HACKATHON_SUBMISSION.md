@@ -160,7 +160,8 @@ the repo — `docs/SECURITY.md`, `plan/`, `.plans/`.)
       approves → reimburse; plus a Thai chat proposal
 - [x] Public GitHub repo visible to judges (transferred org:
       `napatsakornnut/stocksie`) — pushed through `b0e3572` on 2026-10-10
-- [ ] Hosted UI link for judges — Vercel import + env vars per
-      `docs/DEPLOY_VERCEL.md`, then paste the URL here: ___________
+- [x] Hosted UI link for judges — **https://stocksie-th.vercel.app**
+      (deployed 2026-10-10 via Vercel CLI from the local checkout, no GitHub
+      linkage needed; guide: `docs/DEPLOY_VERCEL.md`)
 - [ ] IDL account on devnet (explorer polish, optional):
       `anchor idl init …` in `docs/DEPLOY_DEVNET.md` §2
