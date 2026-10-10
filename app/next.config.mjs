@@ -8,17 +8,26 @@
 // to the repo root explicitly so both the warning and standalone deployment
 // tracing behave deterministically.
 
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectDir = dirname(fileURLToPath(import.meta.url));
 
+// Pin the workspace root for output file tracing (see file header) — but only
+// inside the real Anchor workspace (the repo root holds Anchor.toml). On git
+// hosts (Vercel) `app/` IS the uploaded root; pointing one level up makes
+// Next look for `<root>/<root>/.next/routes-manifest.json` and the deploy
+// dies after a successful build.
+const workspaceRoot = existsSync(resolve(projectDir, "..", "Anchor.toml"))
+  ? resolve(projectDir, "..")
+  : undefined;
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
 
-  // Pin the workspace root for output file tracing (see file header).
-  outputFileTracingRoot: resolve(projectDir, ".."),
+  outputFileTracingRoot: workspaceRoot,
 
   webpack: (config, { isServer }) => {
     // `@solana/web3.js` / `@coral-xyz/borsh` reference a handful of Node-only
