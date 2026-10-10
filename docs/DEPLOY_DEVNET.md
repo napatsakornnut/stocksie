@@ -25,12 +25,42 @@ If the CLI faucet is rate-limited, the web faucet is
 
 ## 2. Deploy (program + IDL)
 
+Congested devnet (hackathon weeks) can reject `solana program deploy`'s write
+burst with `Max retries exceeded`, stranding a half-written buffer each try.
+The paced, resumable writer in `scripts/deploy-devnet-buffer.js` walks the
+same on-chain wire under the public RPC rate ceiling:
+
 ```sh
-anchor deploy --provider.cluster devnet
+# create + write the whole ELF at ~4 sends in flight, with 429 backoff
+node scripts/deploy-devnet-buffer.js target/deploy/stocksie.so
+
+# …or resume a known buffer, writing only chunks that differ
+node scripts/deploy-devnet-buffer.js target/deploy/stocksie.so <BUFFER_PUBKEY>
+
+# finalize (single tx — the CLI sees a complete buffer and just deploys it)
+solana program deploy --url devnet --buffer <BUFFER_PUBKEY> \
+  --program-id target/deploy/stocksie-keypair.json \
+  --with-compute-unit-price 100000 target/deploy/stocksie.so
 ```
 
-This deploys the `.so` **and** the IDL (so judges can inspect the interface
-via Anchor explorers). Verify:
+Recovered that way on 2026-10-10: buffer `95Te…tXMC` → program
+`At2vd…Qoj` live on devnet (slot 509421543).
+
+Wire notes for anyone touching the script (all verified the hard way):
+`UpgradeableLoaderInstruction` is bincode-encoded — **Write is variant 1**
+with a u32 offset + u64 length prefix + bytes; **variant 4 is SetAuthority**,
+so a wrong index can silently revoke the buffer's authority and brick it.
+Buffer account layout: 4-byte tag + 1-byte COption flag + 32-byte authority,
+then program bytes at offset 37.
+
+Then the IDL (explorer interface metadata — optional, retryable):
+
+```sh
+anchor idl init --filepath target/idl/stocksie.json --provider.cluster devnet \
+  --priority-fee 100000 At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj
+```
+
+Verify:
 
 ```sh
 solana program show At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj --url devnet

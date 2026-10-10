@@ -153,8 +153,9 @@ the repo — `docs/SECURITY.md`, `plan/`, `.plans/`.)
 - [ ] Optional policy gate: `brew install riir-reflex` then
       `RIIR_REFLEX_CORPUS=corpus/household reflex` — drafts get the
       "matches a household rule" badge; without it the app behaves identically
-- [ ] Deploy the program to devnet; point `NEXT_PUBLIC_RPC_ENDPOINT` at devnet —
-      full runbook in `docs/DEPLOY_DEVNET.md`
+- [x] Deploy the program to devnet; point `NEXT_PUBLIC_RPC_ENDPOINT` at devnet —
+      **done 2026-10-10**: `At2vd…Qoj` live (runbook:
+      `docs/DEPLOY_DEVNET.md`; IDL account still to init)
 - [ ] Record 2–3 min demo video: receipt photo → drafts → submit → owner
       approves → reimburse; plus a Thai chat proposal
 - [ ] Public GitHub repo visible to judges (transferred org:
