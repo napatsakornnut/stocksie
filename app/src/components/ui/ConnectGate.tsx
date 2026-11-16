@@ -9,6 +9,7 @@
 
 import { WalletButton } from '@/components/WalletButton';
 import { useHouseholdContext } from '@/hooks/useHouseholdContext';
+import { RPC_ENDPOINT } from '@/lib/constants';
 import type { ReactNode } from 'react';
 
 export type ConnectGateProps = {
@@ -45,6 +46,7 @@ export function ConnectGate({ requireHousehold = true, children }: ConnectGatePr
           Sign in with Phantom, Solflare, or Backpack — or use the built-in
           dev account to try Stocksie on the local cluster.
         </p>
+        <DevnetHint />
         <WalletButton />
       </GateShell>
     );
@@ -60,11 +62,36 @@ export function ConnectGate({ requireHousehold = true, children }: ConnectGatePr
           Your household is tied to its admin's address. It defaults to your
           own account; change it if you joined a household someone else set up.
         </p>
+        <DevnetHint />
       </GateShell>
     );
   }
 
   return <>{children}</>;
+}
+
+/**
+ * Point fresh devnet wallets at the faucet — judges connecting Phantom on the
+ * hosted demo hit an empty wallet and can't pay rent for a household without
+ * it. Rendered only when the app is actually pointed at devnet, so the
+ * localnet/surfpool demo stays quiet.
+ */
+function DevnetHint() {
+  if (!RPC_ENDPOINT.includes('devnet')) return null;
+  return (
+    <p className="text-xs text-stone-500 dark:text-slate-500">
+      On devnet a fresh wallet needs a little SOL for rent + fees — top up at{' '}
+      <a
+        href="https://faucet.solana.com"
+        target="_blank"
+        rel="noreferrer"
+        className="font-medium text-emerald-600 underline underline-offset-2 dark:text-emerald-400"
+      >
+        faucet.solana.com
+      </a>{' '}
+      before setting up a household.
+    </p>
+  );
 }
 
 /** Shared visual wrapper for both gate states — a muted, dashed-bordered box. */
