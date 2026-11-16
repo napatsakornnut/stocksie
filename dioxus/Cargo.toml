@@ -1,0 +1,18 @@
+[package]
+name = "stocksie-dioxus"
+version = "0.1.0"
+edition = "2021"
+description = "RIIR prototype — Stocksie household reader in Dioxus/WASM (plan 007)"
+
+# Detach from the Anchor workspace at the repo root (its members = programs/*).
+[workspace]
+
+[dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+gloo-net = "0.8"
+# 2.x: Pubkey::find_program_address / from_bytes live here (3.x moved them);
+# curve25519 gates PDA derivation off the solana SBF target
+solana-pubkey = { version = "2", features = ["curve25519"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
