@@ -28,7 +28,15 @@
       CORS (AI_ALLOWED_ORIGINS, default ปิด cross-origin เพื่อไม่ให้ยืม key)
       — verify สอง intent จริง: budget_answer grounded ตรง chain + Thai
       propose พร้อม item chips
-- [ ] action instructions บน wire-builder เดิม (init/deposit/approve/reimburse)
+- [x] v0.5 action instructions — compiler ทั่วไป (keys sort signers →
+      writable → readonly + program idx remap) + builders จาก IDL จริง
+      (disc/writable/signer); **E2E บน localnet ผ่านทั้ง lifecycle**:
+      init → deposit → add_member → create → approve, assert state on-chain
+      ทุกขั้น (บั๊กที่ E2E จับได้: program idx ไม่ remap, key sort 2 กลุ่ม
+      ทำ owner_member หลุดโซน writable, buyer ต้อง add_member ก่อน +
+      self-approval ถูกแบน)
+- [ ] (ถ้าต้องการ) wire ฟอร์มเหลือๆ: add_member UI, confirm_restock,
+      reimburse — pattern เดียวกันทั้งหมด
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
 

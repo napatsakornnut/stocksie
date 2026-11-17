@@ -19,7 +19,14 @@ base64 = "0.22"
 # Anchor discriminator (sha256("account:Name")[..8]) + RPC memcmp filter encoding
 sha2 = "0.10"
 bs58 = "0.5"
+blake3 = "1"
 # Wallet Standard interop (injected provider on window.*)
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+# native-only E2E test: signs with a local ed25519 key and executes the real
+# instructions against a running localnet (skips when none is reachable)
+ed25519-dalek = "2"
+ureq = { version = "2", features = ["json"] }

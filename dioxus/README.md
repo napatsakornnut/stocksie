@@ -35,6 +35,17 @@ code.
   live through the Dioxus UI: grounded budget answers (numbers from the
   household/ledger loaded above) and Thai purchase proposals rendered as
   item chips.
+- **Household actions (v0.5)**: initialize / deposit / open request /
+  approve — each built as an Anchor instruction (discriminators from the
+  IDL, blake3 text hashes, PDA derivation) and compiled through the shared
+  wire builder. **Proven against the real program**: a native E2E test
+  (`tests` in `src/main.rs`) signs with a throwaway ed25519 key and executes
+  the full lifecycle on localnet — init → deposit → add_member → create →
+  approve — asserting decoded on-chain state after every step. Three wire
+  bugs the E2E caught and killed: program index must be remapped after the
+  key sort; keys must sort signers → writable → readonly (the runtime reads
+  writability by position); a buyer must be added as a member first
+  (add_member) and cannot approve their own request.
 
 ## Run it
 

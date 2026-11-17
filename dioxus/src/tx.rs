@@ -17,6 +17,22 @@ use std::str::FromStr;
 /// program id and data; the fee payer is the only signer in the message.
 const MEMO_V1: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 
+/// One instruction with its resolved accounts — the input to
+/// [`build_wire_tx`]. `writable`/`signer` come straight from the IDL.
+#[derive(Clone, Debug)]
+pub struct ProgramIx {
+    pub program: Pubkey,
+    /// (pubkey, writable, signer) in the order the instruction declares them.
+    pub accounts: Vec<(Pubkey, bool, bool)>,
+    /// Anchor data = 8-byte discriminator + borsh args.
+    pub data: Vec<u8>,
+}
+
+/// The System Program id — `init`-bearing instructions always carry it.
+pub fn system_program() -> Pubkey {
+    Pubkey::from_str("11111111111111111111111111111111").expect("constant parses")
+}
+
 /// Solana's compact-u16 ("shortvec"): little-endian 7-bit groups, high bit =
 /// more bytes follow.
 fn put_shortvec(out: &mut Vec<u8>, mut n: usize) {
@@ -37,28 +53,123 @@ fn put_shortvec(out: &mut Vec<u8>, mut n: usize) {
 /// zeroed, ready for `signAndSendTransaction` on an injected provider.
 pub fn build_memo_tx(payer: &Pubkey, blockhash: &[u8; 32], memo: &str) -> Vec<u8> {
     let memo_program = Pubkey::from_str(MEMO_V1).expect("constant parses");
+    let memo_ix = ProgramIx {
+        program: memo_program,
+        accounts: vec![],
+        data: {
+            let mut d = Vec::new();
+            d.extend_from_slice(memo.as_bytes());
+            d
+        },
+    };
+    build_wire_tx(payer, blockhash, &[memo_ix])
+}
+
+/// Compile arbitrary instructions into legacy wire bytes
+/// (`[sig_count][zeroed sig slots][message]`) exactly like
+/// `@solana/web3.js`'s `Transaction.compileMessage` + serialize:
+///
+/// - the fee payer is the first key (signer + writable);
+/// - all signers precede non-signers (first-appearance order within groups);
+/// - account metas OR-merge when the same key appears in several places;
+/// - instructions reference keys by index.
+pub fn build_wire_tx(payer: &Pubkey, blockhash: &[u8; 32], ixs: &[ProgramIx]) -> Vec<u8> {
+    #[derive(Clone, Copy, PartialEq)]
+    struct Meta {
+        signer: bool,
+        writable: bool,
+    }
+    let mut keys: Vec<Pubkey> = vec![*payer];
+    let mut metas: Vec<Meta> = vec![Meta { signer: true, writable: true }];
+
+    let mut push_key = |keys: &mut Vec<Pubkey>, metas: &mut Vec<Meta>, pk: Pubkey, m: Meta| -> usize {
+        if let Some(i) = keys.iter().position(|k| *k == pk) {
+            let existing = metas[i];
+            metas[i] = Meta {
+                signer: existing.signer || m.signer,
+                writable: existing.writable || m.writable,
+            };
+            i
+        } else {
+            keys.push(pk);
+            metas.push(m);
+            keys.len() - 1
+        }
+    };
+
+    let mut compiled: Vec<(usize, usize, Vec<u8>, usize)> = Vec::new(); // (program_idx, acct_idx_start, data, data_len)
+    let mut compiled_accounts: Vec<Vec<usize>> = Vec::new();
+    for ix in ixs {
+        let program_idx =
+            push_key(&mut keys, &mut metas, ix.program, Meta { signer: false, writable: false });
+        let mut idxs = Vec::with_capacity(ix.accounts.len());
+        for (pk, writable, signer) in &ix.accounts {
+            let i = push_key(
+                &mut keys,
+                &mut metas,
+                *pk,
+                Meta { signer: *signer, writable: *writable },
+            );
+            idxs.push(i);
+        }
+        compiled_accounts.push(idxs);
+        compiled.push((program_idx, 0, ix.data.clone(), ix.data.len()));
+    }
+
+    // signers must precede non-signers: stable partition, payer stays first.
+    let payer_meta = metas[0];
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    // web3.js key ordering (the runtime reads writability by POSITION: the
+    // last `readonlyUnsigned` keys are readonly!): stable 3-way sort —
+    // signers first, then writable non-signers, then readonly non-signers.
+    order.sort_by_key(|&i| {
+        let m = metas[i];
+        if m.signer {
+            0
+        } else if m.writable {
+            1
+        } else {
+            2
+        }
+    });
+    let mut remap = vec![0usize; keys.len()];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old] = new;
+    }
+    let sorted_keys: Vec<Pubkey> = order.iter().map(|&i| keys[i]).collect();
+    let sorted_metas: Vec<Meta> = order.iter().map(|&i| metas[i]).collect();
+    debug_assert_eq!(sorted_keys[0], *payer, "fee payer must sort first");
+    debug_assert!(sorted_metas[0].signer);
 
     let mut msg = Vec::new();
-    // message header: [required sigs, readonly signed, readonly unsigned]
-    // payer = writable signer; memo program = readonly unsigned
-    msg.extend_from_slice(&[1, 0, 1]);
-    put_shortvec(&mut msg, 2);
-    msg.extend_from_slice(payer.as_ref());
-    msg.extend_from_slice(memo_program.as_ref());
+    let required_sigs = sorted_metas.iter().filter(|m| m.signer).count();
+    let readonly_signed = sorted_metas.iter().filter(|m| m.signer && !m.writable).count();
+    let readonly_unsigned = sorted_metas.iter().filter(|m| !m.signer && !m.writable).count();
+    msg.push(required_sigs as u8);
+    msg.push(readonly_signed as u8);
+    msg.push(readonly_unsigned as u8);
+    put_shortvec(&mut msg, sorted_keys.len());
+    for k in &sorted_keys {
+        msg.extend_from_slice(k.as_ref());
+    }
     msg.extend_from_slice(blockhash);
-    // instructions: one memo — programIdx 1, no accounts, utf8 data
-    put_shortvec(&mut msg, 1);
-    msg.push(1);
-    put_shortvec(&mut msg, 0);
-    let data = memo.as_bytes();
-    put_shortvec(&mut msg, data.len());
-    msg.extend_from_slice(data);
+    put_shortvec(&mut msg, ixs.len());
+    for ((program_idx, _, data, data_len), idxs) in compiled.iter().zip(&compiled_accounts) {
+        msg.push(remap[*program_idx] as u8);
+        put_shortvec(&mut msg, idxs.len());
+        for i in idxs {
+            msg.push(remap[*i] as u8);
+        }
+        put_shortvec(&mut msg, *data_len);
+        msg.extend_from_slice(data);
+    }
 
-    let mut tx = Vec::with_capacity(msg.len() + 65);
-    tx.push(1);
-    tx.extend_from_slice(&[0u8; 64]);
-    tx.extend_from_slice(&msg);
-    tx
+    let mut wire = Vec::with_capacity(msg.len() + 65);
+    wire.push(required_sigs as u8);
+    wire.extend_from_slice(&vec![0u8; 64 * required_sigs.max(1)]);
+    wire.extend_from_slice(&msg);
+    let _ = payer_meta;
+    wire
 }
 
 #[cfg(test)]
