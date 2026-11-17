@@ -20,6 +20,15 @@ code.
   base58-encoded via `bs58`) + household filter @8, borsh-decoded to a
   sortable table — cross-verified against a raw RPC probe (id, amount,
   status tag, slot all match)
+- **Wallet Standard signing (v0.3)**: detects `window.phantom.solana` /
+  `window.solana` via js-sys, builds a SPL Memo v1 wire transaction in pure
+  Rust (hand-rolled shortvec + message layout, zeroed signature slot —
+  golden-tested byte-for-byte against `@solana/web3.js serializeMessage`,
+  see `src/tx.rs` tests), and hands it to
+  `signAndSendTransaction({transaction})`; the wallet signs and submits.
+  Verified with an injected mock provider (captured wire bytes =
+  byte-identical to a web3.js reconstruction, 209 bytes incl. live devnet
+  blockhash) — try it with real Phantom in your Chrome.
 
 ## Run it
 
@@ -34,13 +43,16 @@ dx build --web                             # static output in dist/
 Two demo owners are pre-wired (the devnet demo household + the deploy wallet,
 which has no household — the error path).
 
-## The RIIR frontier (deliberately not in v0.1)
+## The RIIR frontier (deliberately not yet)
 
 | Piece | Why it's the hard part |
 |---|---|
-| **Wallet Standard signing** | Phantom/Solflare inject JS providers on `window`; signing from Rust means web-sys bindings to the injected provider (`signTransaction` in → serialized tx out). Read-only views don't need it; anything money-moving does. |
 | **AI agent UI** | The `/api/ai` route is server-side; a Dioxus client can call it as-is. |
 | **Styling parity** | Tailwind classes can't carry over 1:1; the prototype uses inline styles. |
+
+Signing is now proven — the remaining RIIR work is breadth, not a blocked
+mechanism: rebuild the household *actions* (init/deposit/request/approve)
+on the same wire-builder pattern, then the agent page.
 
 If the RIIR continues, the suggested slice order is: request ledger →
 wallet-signing interop → agent page. Keep `app/` as the production surface

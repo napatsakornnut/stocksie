@@ -2782,10 +2782,13 @@ dependencies = [
  "bs58",
  "dioxus",
  "gloo-net 0.8.0",
+ "js-sys",
  "serde",
  "serde_json",
  "sha2",
  "solana-pubkey",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

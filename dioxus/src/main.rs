@@ -19,9 +19,11 @@
 //   [93..101] vault_balance: u64  (mirror; the account's lamports are truth)
 //   [101..109] created_slot: u64
 //
-// Not yet in Rust (the real RIIR frontier, see README): Wallet Standard
-// interop for signing, the purchase-request ledger, the AI agent. The
+// Not yet in Rust (the real RIIR frontier, see README): the AI agent UI. The
 // Next.js app remains the production surface — this crate is additive.
+
+mod tx;
+mod wallet;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -94,10 +96,86 @@ enum LedgerState {
     Failed(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum SendState {
+    Idle,
+    Building,
+    Sent(String),
+    Failed(String),
+}
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
     let mut ledger = use_signal(|| LedgerState::Idle);
+    let mut wallet_pubkey = use_signal(|| None::<String>);
+    let mut wallet_error = use_signal(|| None::<String>);
+    let mut wallet_busy = use_signal(|| false);
+    let mut send_state = use_signal(|| SendState::Idle);
+
+    let connect_wallet = move |_| {
+        spawn(async move {
+            wallet_busy.set(true);
+            wallet_error.set(None);
+            match wallet::detect_provider() {
+                Err(e) => wallet_error.set(Some(e)),
+                Ok(provider) => match wallet::connect(&provider).await {
+                    Ok(pk) => wallet_pubkey.set(Some(pk)),
+                    Err(e) => wallet_error.set(Some(e)),
+                },
+            }
+            wallet_busy.set(false);
+        });
+    };
+
+    let send_memo = move |_| {
+        spawn(async move {
+            wallet_error.set(None);
+            let Some(pk) = wallet_pubkey().clone() else {
+                wallet_error.set(Some("Connect a wallet first.".into()));
+                return;
+            };
+            send_state.set(SendState::Building);
+            let payer = match Pubkey::from_str(&pk) {
+                Ok(p) => p,
+                Err(_) => {
+                    send_state.set(SendState::Failed("connected key is invalid".into()));
+                    return;
+                }
+            };
+            // recent blockhash from devnet, then hand the wire bytes to the
+            // injected wallet — IT fills the signature slot and submits.
+            let blockhash = match rpc_call(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getLatestBlockhash",
+                "params": [{"commitment": "confirmed"}]
+            })).await.and_then(|r| {
+                let bh = r.get("value")
+                    .and_then(|v| v.get("blockhash"))
+                    .and_then(|b| b.as_str())
+                    .ok_or("missing blockhash in RPC response")?
+                    .to_string();
+                bs58::decode(&bh).into_vec()
+                    .map_err(|e| format!("bad blockhash: {e}"))
+                    .and_then(|v| <[u8; 32]>::try_from(v).map_err(|_| "blockhash length".to_string()))
+            }) {
+                Ok(bh) => bh,
+                Err(e) => {
+                    send_state.set(SendState::Failed(e));
+                    return;
+                }
+            };
+            let wire = tx::build_memo_tx(&payer, &blockhash, "GM from Stocksie RIIR 🦀 (Dioxus/WASM)");
+            match wallet::detect_provider() {
+                Err(e) => send_state.set(SendState::Failed(e)),
+                Ok(provider) => match wallet::sign_and_send(&provider, &wire).await {
+                    Ok(sig) => send_state.set(SendState::Sent(sig)),
+                    Err(e) => send_state.set(SendState::Failed(e)),
+                },
+            }
+        });
+    };
 
     let fetch = move |owner_raw: String| {
         let owner_raw = owner_raw.trim().to_string();
@@ -184,6 +262,67 @@ fn app() -> Element {
                     p { style: "color:#a8a29e;font-size:13px", "No purchase requests for this household yet." }
                 },
                 LedgerState::Loaded(rows) => rsx! { LedgerTable { rows: rows.clone() } },
+            }
+
+            h2 { style: "margin:28px 0 8px;font-size:16px", "👛 Wallet — first signed tx from Rust" }
+            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
+                p { style: "font-size:12px;color:#78716c;margin:0",
+                    "Detects window.phantom (Wallet Standard), builds the memo tx wire bytes in Rust, and hands them to the wallet — the wallet fills the signature slot and submits."
+                }
+                match &*wallet_pubkey.read() {
+                    Some(pk) => rsx! {
+                        div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap",
+                            span { style: "padding:2px 10px;border-radius:9999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:600", "connected" }
+                            span { style: "font-family:ui-monospace,monospace;font-size:12px", "{pk}" }
+                        }
+                        button {
+                            style: "padding:8px 14px;border:none;border-radius:8px;background:#059669;color:white;font-weight:600;cursor:pointer",
+                            onclick: send_memo,
+                            disabled: matches!(&*send_state.read(), SendState::Building),
+                            if matches!(&*send_state.read(), SendState::Building) {
+                                "Building & sending…"
+                            } else {
+                                "Send a GM memo tx (your wallet signs)"
+                            }
+                        }
+                    },
+                    None => rsx! {
+                        button {
+                            style: "padding:8px 14px;border:none;border-radius:8px;background:#8250df;color:white;font-weight:600;cursor:pointer",
+                            onclick: connect_wallet,
+                            disabled: *wallet_busy.read(),
+                            if *wallet_busy.read() { "Connecting…" } else { "Connect Phantom" }
+                        }
+                    },
+                }
+                if let Some(err) = &*wallet_error.read() {
+                    p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {err}" }
+                }
+                match &*send_state.read() {
+                    SendState::Idle => rsx! {
+                        p { style: "font-size:12px;color:#a8a29e;margin:0",
+                            "Nothing sent yet — the tx is a SPL Memo v1 with your key as fee payer."
+                        }
+                    },
+                    SendState::Building => rsx! {
+                        p { style: "font-size:12px;color:#a8a29e;margin:0", "Fetching blockhash & building wire bytes…" }
+                    },
+                    SendState::Failed(e) => rsx! {
+                        p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {e}" }
+                    },
+                    SendState::Sent(sig) => rsx! {
+                        div { style: "padding:10px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;display:grid;gap:6px",
+                            span { style: "font-size:12px;color:#166534;font-weight:600", "Signed & submitted ✓" }
+                            a {
+                                href: "https://explorer.solana.com/tx/{sig}?cluster=devnet",
+                                target: "_blank",
+                                style: "font-size:12px;color:#1d4ed8",
+                                "view on Solana Explorer ↗"
+                            }
+                            code { style: "font-size:10px;word-break:break-all;color:#78716c", "{sig}" }
+                        }
+                    },
+                }
             }
 
             footer { style: "margin-top:40px;color:#a8a29e;font-size:11px;border-top:1px solid #e7e5e4;padding-top:12px",

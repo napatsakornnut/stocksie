@@ -20,8 +20,12 @@
 - [x] v0.1 household reader — verify กับ devnet ครบ (commit 752a07d)
 - [x] v0.2 request ledger — getProgramAccounts + discriminator/base58 memcmp +
       borsh decode, cross-verify กับ raw RPC ตรงทุก field
-- [ ] Wallet Standard signing ผ่าน web-sys
+- [x] v0.3 Wallet Standard signing — memo tx wire builder (golden test vs
+      web3.js serializeMessage) + js-sys interop (connect / signAndSend);
+      mock-provider verify: captured bytes == web3.js reconstruction
+      (BYTE-IDENTICAL, 209 bytes) — real-Phantom test คือหมุดถัดไปของผู้ใช้
 - [ ] agent UI (ยิง /api/ai เดิมได้เลย)
+- [ ] action instructions บน wire-builder เดิม (init/deposit/approve/reimburse)
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
 

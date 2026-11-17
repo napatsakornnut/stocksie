@@ -19,3 +19,7 @@ base64 = "0.22"
 # Anchor discriminator (sha256("account:Name")[..8]) + RPC memcmp filter encoding
 sha2 = "0.10"
 bs58 = "0.5"
+# Wallet Standard interop (injected provider on window.*)
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
