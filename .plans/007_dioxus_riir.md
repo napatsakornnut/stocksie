@@ -18,7 +18,8 @@
 ## สถานะ
 
 - [x] v0.1 household reader — verify กับ devnet ครบ (commit 752a07d)
-- [ ] request ledger (getProgramAccounts + memcmp + decode)
+- [x] v0.2 request ledger — getProgramAccounts + discriminator/base58 memcmp +
+      borsh decode, cross-verify กับ raw RPC ตรงทุก field
 - [ ] Wallet Standard signing ผ่าน web-sys
 - [ ] agent UI (ยิง /api/ai เดิมได้เลย)
 

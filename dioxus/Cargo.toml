@@ -16,3 +16,6 @@ solana-pubkey = { version = "2", features = ["curve25519"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# Anchor discriminator (sha256("account:Name")[..8]) + RPC memcmp filter encoding
+sha2 = "0.10"
+bs58 = "0.5"

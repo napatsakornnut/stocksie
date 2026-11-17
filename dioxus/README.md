@@ -6,7 +6,7 @@ frontend remains `app/` (Next.js) — **this crate is additive**, a working
 proof that the on-chain client logic runs in pure Rust with zero JS client
 code.
 
-## What works today (v0.1)
+## What works today (v0.2)
 
 - Derive the household PDA client-side in Rust
   (`Pubkey::find_program_address`, `solana-pubkey`)
@@ -15,6 +15,11 @@ code.
 - Read view: vault balance, owner, member count, request counter, rewards
   total, creation slot, and the blake3 name fingerprint (privacy-by-design,
   shown as hex)
+- **Purchase-request ledger (v0.2)**: `getProgramAccounts` with an Anchor
+  discriminator memcmp filter (`sha256("account:PurchaseRequest")[..8]`,
+  base58-encoded via `bs58`) + household filter @8, borsh-decoded to a
+  sortable table — cross-verified against a raw RPC probe (id, amount,
+  status tag, slot all match)
 
 ## Run it
 
@@ -34,7 +39,6 @@ which has no household — the error path).
 | Piece | Why it's the hard part |
 |---|---|
 | **Wallet Standard signing** | Phantom/Solflare inject JS providers on `window`; signing from Rust means web-sys bindings to the injected provider (`signTransaction` in → serialized tx out). Read-only views don't need it; anything money-moving does. |
-| **Purchase-request ledger** | `getProgramAccounts` + memcmp filters + borsh decode — mechanical, just volume. |
 | **AI agent UI** | The `/api/ai` route is server-side; a Dioxus client can call it as-is. |
 | **Styling parity** | Tailwind classes can't carry over 1:1; the prototype uses inline styles. |
 

@@ -28,6 +28,7 @@ use base64::Engine;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -53,6 +54,8 @@ fn main() {
 #[derive(Clone, Debug, PartialEq)]
 struct HouseholdView {
     pda: String,
+    /// Raw key so downstream fetches (the request ledger) can filter on it.
+    pda_key: Pubkey,
     lamports_sol: String,
     owner: String,
     name_hash_hex: String,
@@ -71,18 +74,52 @@ enum FetchState {
     Failed(String),
 }
 
+/// One decoded `PurchaseRequest` account.
+#[derive(Clone, Debug, PartialEq)]
+struct RequestView {
+    pubkey: String,
+    request_id: u64,
+    amount_sol: String,
+    status: &'static str,
+    buyer: String,
+    reward_earned: u64,
+    created_slot: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LedgerState {
+    Idle,
+    Loading,
+    Loaded(Vec<RequestView>),
+    Failed(String),
+}
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
+    let mut ledger = use_signal(|| LedgerState::Idle);
 
     let fetch = move |owner_raw: String| {
         let owner_raw = owner_raw.trim().to_string();
         spawn(async move {
             state.set(FetchState::Loading);
-            state.set(match load_household(&owner_raw).await {
-                Ok(v) => FetchState::Loaded(Box::new(v)),
-                Err(e) => FetchState::Failed(e),
-            });
+            ledger.set(LedgerState::Idle);
+            match load_household(&owner_raw).await {
+                Ok(v) => {
+                    let key = v.pda_key;
+                    state.set(FetchState::Loaded(Box::new(v)));
+                    // Household lives → pull its purchase-request ledger.
+                    ledger.set(LedgerState::Loading);
+                    ledger.set(match load_ledger(&key).await {
+                        Ok(rows) => LedgerState::Loaded(rows),
+                        Err(e) => LedgerState::Failed(e),
+                    });
+                }
+                Err(e) => {
+                    state.set(FetchState::Failed(e));
+                    ledger.set(LedgerState::Idle);
+                }
+            }
         });
     };
 
@@ -134,6 +171,21 @@ fn app() -> Element {
                 FetchState::Loaded(v) => rsx! { HouseholdCard { view: *v.clone() } },
             }
 
+            h2 { style: "margin:28px 0 8px;font-size:16px", "🛒 Purchase ledger" }
+            match &*ledger.read() {
+                LedgerState::Idle => rsx! { p { style: "color:#a8a29e;font-size:13px", "Load a household to see its requests." } },
+                LedgerState::Loading => rsx! { p { style: "color:#a8a29e;font-size:13px", "Reading the ledger from devnet…" } },
+                LedgerState::Failed(msg) => rsx! {
+                    div { style: "padding:12px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;color:#b91c1c;font-size:13px",
+                        "⚠ {msg}"
+                    }
+                },
+                LedgerState::Loaded(rows) if rows.is_empty() => rsx! {
+                    p { style: "color:#a8a29e;font-size:13px", "No purchase requests for this household yet." }
+                },
+                LedgerState::Loaded(rows) => rsx! { LedgerTable { rows: rows.clone() } },
+            }
+
             footer { style: "margin-top:40px;color:#a8a29e;font-size:11px;border-top:1px solid #e7e5e4;padding-top:12px",
                 "Privacy note: the household name never lands on-chain — the contract stores a blake3 fingerprint only, decoded here as hex. "
                 "Program: " {PROGRAM_ID}
@@ -166,6 +218,54 @@ fn Row(label: String, value: String) -> Element {
         div { style: "display:flex;justify-content:space-between;gap:12px;font-size:13px",
             span { style: "color:#78716c", "{label}" }
             span { style: "font-family:ui-monospace,monospace;word-break:break-all;text-align:right", "{value}" }
+        }
+    }
+}
+
+fn status_style(status: &str) -> &'static str {
+    match status {
+        "waiting" => "background:#fef3c7;color:#92400e",
+        "approved" => "background:#dbeafe;color:#1e40af",
+        "restocked" => "background:#ede9fe;color:#5b21b6",
+        "reimbursed" => "background:#dcfce7;color:#166534",
+        "rejected" => "background:#fee2e2;color:#991b1b",
+        _ => "background:#f5f5f4;color:#57534e",
+    }
+}
+
+#[component]
+fn LedgerTable(rows: Vec<RequestView>) -> Element {
+    rsx! {
+        div { style: "border:1px solid #d6d3d1;border-radius:12px;overflow:hidden",
+            table { style: "width:100%;border-collapse:collapse;font-size:12px",
+                thead {
+                    tr { style: "background:#fafaf9;text-align:left",
+                        th { style: "padding:8px 10px", "#" }
+                        th { style: "padding:8px 10px", "Status" }
+                        th { style: "padding:8px 10px", "Spending limit" }
+                        th { style: "padding:8px 10px", "Buyer" }
+                        th { style: "padding:8px 10px", "Rewards" }
+                        th { style: "padding:8px 10px", "Created" }
+                    }
+                }
+                tbody {
+                    for row in rows {
+                        tr { style: "border-top:1px solid #e7e5e4",
+                            td { style: "padding:8px 10px;font-family:ui-monospace,monospace", "#{row.request_id}" }
+                            td { style: "padding:8px 10px",
+                                span {
+                                    style: "padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600 {status_style(row.status)}",
+                                    "{row.status}"
+                                }
+                            }
+                            td { style: "padding:8px 10px;font-family:ui-monospace,monospace", "{row.amount_sol} SOL" }
+                            td { style: "padding:8px 10px;font-family:ui-monospace,monospace", title: "{row.buyer}", "{row.buyer}" }
+                            td { style: "padding:8px 10px", "{row.reward_earned} pts" }
+                            td { style: "padding:8px 10px;color:#78716c", "slot {row.created_slot}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -212,6 +312,7 @@ async fn load_household(owner_raw: &str) -> Result<HouseholdView, String> {
 
     Ok(HouseholdView {
         pda: format!("{pda} (bump {bump})"),
+        pda_key: pda,
         lamports_sol: format!("{:.6}", lamports as f64 / 1e9),
         owner: Pubkey::try_from(&bytes[8..40])
             .map(|p| p.to_string())
@@ -225,14 +326,96 @@ async fn load_household(owner_raw: &str) -> Result<HouseholdView, String> {
     })
 }
 
-/// Minimal JSON-RPC wrapper: getAccountInfo with base64 encoding.
-async fn rpc_get_account(pubkey: &Pubkey) -> Result<serde_json::Value, String> {
+/// Anchor's sha256("account:PurchaseRequest")[..8] discriminator — lets a
+/// `getProgramAccounts` memcmp filter skip Member/household accounts.
+fn purchase_discriminator() -> [u8; 8] {
+    let hash = Sha256::digest(b"account:PurchaseRequest");
+    hash[..8].try_into().expect("8-byte slice")
+}
+
+fn status_name(tag: u8) -> &'static str {
+    // programs/stocksie/src/types.rs — plain u8-tag enum, no payloads
+    match tag {
+        0 => "waiting",
+        1 => "approved",
+        2 => "restocked",
+        3 => "reimbursed",
+        4 => "rejected",
+        _ => "unknown",
+    }
+}
+
+/// Fetch every `PurchaseRequest` of one household:
+/// getProgramAccounts filtered by discriminator @0 and household @8.
+async fn load_ledger(household: &Pubkey) -> Result<Vec<RequestView>, String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "getAccountInfo",
-        "params": [pubkey.to_string(), {"encoding": "base64", "commitment": "confirmed"}]
+        "method": "getProgramAccounts",
+        "params": [
+            PROGRAM_ID,
+            {
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "filters": [
+                    {"memcmp": {"offset": 0, "bytes": bs58::encode(purchase_discriminator()).into_string()}},
+                    {"memcmp": {"offset": 8, "bytes": household.to_string()}}
+                ]
+            }
+        ]
     });
+    let result = rpc_call(body).await?;
+    let accounts = result
+        .as_array()
+        .ok_or("unexpected getProgramAccounts response shape")?;
+
+    let mut rows = Vec::with_capacity(accounts.len());
+    for entry in accounts {
+        let account = entry
+            .get("account")
+            .ok_or("missing account in getProgramAccounts entry")?;
+        let encoded = account
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|d| d.first())
+            .and_then(|s| s.as_str())
+            .ok_or("malformed account data")?;
+        let bytes = B64.decode(encoded).map_err(|e| format!("base64 decode failed: {e}"))?;
+        // Layout (programs/stocksie/src/state/purchase_request.rs): 8-byte
+        // discriminator, then household@8, buyer@40, id@72, amount@80,
+        // item_hash@88, unit_cost_hash@120, status@152 (u8), approved_by@153,
+        // approved_slot@185, restocked_slot@193, reimbursed@201, reward@209,
+        // bump@217, created_slot@218. Total 226.
+        if bytes.len() < 226 {
+            continue; // short/legacy account — skip rather than misread
+        }
+        let u64_at = |off: usize| u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+        rows.push(RequestView {
+            pubkey: entry
+                .get("pubkey")
+                .and_then(|p| p.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            request_id: u64_at(72),
+            amount_sol: format!("{:.6}", u64_at(80) as f64 / 1e9),
+            status: status_name(bytes[152]),
+            buyer: Pubkey::try_from(&bytes[40..72])
+                .map(|p| {
+                    let s = p.to_string();
+                    format!("{}…{}", &s[..6], &s[s.len() - 4..])
+                })
+                .unwrap_or_else(|_| "decode error".into()),
+            reward_earned: u64_at(209),
+            created_slot: u64_at(218),
+        });
+    }
+    rows.sort_by_key(|r| r.request_id);
+    Ok(rows)
+}
+
+/// Generic JSON-RPC POST against the devnet endpoint, unwrapping the
+/// `result` envelope (or surfacing the error object verbatim).
+async fn rpc_call(body: serde_json::Value) -> Result<serde_json::Value, String> {
     let resp = Request::post("https://api.devnet.solana.com")
         .json(&body)
         .map_err(|e| format!("RPC body encode failed: {e}"))?
@@ -252,6 +435,18 @@ async fn rpc_get_account(pubkey: &Pubkey) -> Result<serde_json::Value, String> {
         .get("result")
         .cloned()
         .ok_or_else(|| format!("unexpected RPC response: {}", &text[..text.len().min(160)]))
+}
+
+/// getAccountInfo with base64 encoding — returns the full result envelope
+/// (`{ context, value: account | null }`), NOT the bare account.
+async fn rpc_get_account(pubkey: &Pubkey) -> Result<serde_json::Value, String> {
+    rpc_call(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [pubkey.to_string(), {"encoding": "base64", "commitment": "confirmed"}]
+    }))
+    .await
 }
 
 fn hex(bytes: &[u8]) -> String {
