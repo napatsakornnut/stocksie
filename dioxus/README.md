@@ -50,6 +50,15 @@ code.
   member first (add_member) and cannot approve their own request.
   Household-PDA derivation always goes through the ADMIN address, never the
   signing member's — a bug class the E2E surfaced twice.
+- **Receipt scan (v0.7)**: file input → `/api/ai` mode receipt → items with
+  THB amounts → each line converts to SOL at the live CoinGecko rate
+  (fallback constant) and opens a REAL `create_purchase_request` via the
+  wire builder — the counter is re-read from the chain per send so
+  back-to-back items never collide on the request PDA. Verified end-to-end
+  in the browser with the `app/public/receipt-test.html` fixture: 4 lines
+  extracted, first line captured as a 415-byte tx whose discriminator,
+  amount (38,515,908 lamports ≈ ฿94 at the live rate), and self-buy key
+  dedupe all decode correctly.
 
 ## Run it
 

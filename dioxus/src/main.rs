@@ -47,6 +47,12 @@ const AI_API_URL: &str = "http://localhost:3000/api/ai";
 /// Devnet JSON-RPC endpoint (the prototype targets devnet like the hosted app).
 const RPC_URL: &str = "https://api.devnet.solana.com";
 
+/// Program guards mirrored from lib/constants.rs (receipt → request conversion).
+const MIN_REQUEST_LAMPORTS: u64 = 100_000;
+const MAX_REQUEST_LAMPORTS: u64 = 500_000_000;
+/// Fallback THB/SOL when CoinGecko is unreachable (same default as the Next app).
+const DEFAULT_SOL_THB: f64 = 5600.0;
+
 /// Households to try out of the box (owner address, label).
 const DEMO_OWNERS: [(&str, &str); 2] = [
     (
@@ -139,6 +145,10 @@ impl ChatItem {
             self.total_minor as f64 / 100.0
         )
     }
+
+    fn price_label(&self) -> String {
+        format!("฿{:.2}", self.total_minor as f64 / 100.0)
+    }
 }
 
 /// Parse a user-typed SOL amount to lamports (string math, ≤9 decimals).
@@ -222,6 +232,58 @@ async fn refresh_into(
     }
 }
 
+/// Read the picked file from a hidden file input (web-sys; the Dioxus file
+/// API moved between versions — this is version-proof).
+async fn read_receipt_file(input_id: &str) -> Result<(Vec<u8>, String), String> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window().ok_or("no window")?;
+    let doc = window.document().ok_or("no document")?;
+    let input = doc
+        .get_element_by_id(input_id)
+        .ok_or("file input missing")?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .map_err(|_| "not an input element")?;
+    let file = input
+        .files()
+        .and_then(|fl| fl.get(0))
+        .ok_or("pick an image first")?;
+    let mime = file.type_();
+    let promise = file.array_buffer();
+    let ab = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("read failed: {e:?}"))?;
+    Ok((js_sys::Uint8Array::new(&ab).to_vec(), mime))
+}
+
+/// Household PDA + the CURRENT on-chain request counter — each receipt item
+/// creates a real request, so the counter must be re-read per send (never
+/// trust a cached one for back-to-back creates).
+async fn fetch_household_state(owner: &Pubkey) -> Result<(Pubkey, u64), String> {
+    let (household, _) = programs::household_pda(owner, &programs::program_id());
+    let res = rpc_call(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [household.to_string(), {"encoding": "base64", "commitment": "confirmed"}]
+    }))
+    .await?;
+    let acc = res
+        .get("value")
+        .filter(|v| !v.is_null())
+        .ok_or("household not initialized for this wallet")?;
+    let data_b64 = acc
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|d| d.first())
+        .and_then(|s| s.as_str())
+        .ok_or("malformed account")?;
+    let bytes = B64.decode(data_b64).map_err(|e| format!("base64: {e}"))?;
+    if bytes.len() < 85 {
+        return Err("account too short".into());
+    }
+    Ok((household, u64::from_le_bytes(bytes[77..85].try_into().unwrap())))
+}
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
@@ -246,6 +308,12 @@ fn app() -> Element {
     let mut chat = use_signal(Vec::new);
     let mut chat_input = use_signal(String::new);
     let mut chat_busy = use_signal(|| false);
+    // receipt → requests (v0.7)
+    let mut receipt_items = use_signal(Vec::new);
+    let mut receipt_state = use_signal(|| "idle".to_string());
+    let mut receipt_currency = use_signal(|| "THB".to_string());
+    let mut sol_thb = use_signal(|| DEFAULT_SOL_THB);
+    let mut receipt_input_key = use_signal(|| 0u32);
 
     let connect_wallet = move |_| {
         spawn(async move {
@@ -681,6 +749,173 @@ fn app() -> Element {
         });
     };
 
+    // live THB/SOL rate for receipt conversion (fallback constant offline)
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(res) = gloo_net::http::Request::get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=thb",
+            )
+            .send()
+            .await
+            {
+                if let Ok(v) = res.json::<serde_json::Value>().await {
+                    if let Some(thb) = v
+                        .get("solana")
+                        .and_then(|s| s.get("thb"))
+                        .and_then(|t| t.as_f64())
+                    {
+                        if thb > 0.0 {
+                            sol_thb.set(thb);
+                        }
+                    }
+                }
+            }
+        });
+    });
+
+    // 🧾 receipt: read the picked file (web-sys), POST to /api/ai, list items
+    let parse_receipt = move |_| {
+        spawn(async move {
+            receipt_state.set("loading".to_string());
+            let (bytes, mime) = match read_receipt_file("receipt-file").await {
+                Ok(r) => r,
+                Err(e) => {
+                    receipt_state.set(format!("error:{e}"));
+                    return;
+                }
+            };
+            if bytes.len() > 8 * 1024 * 1024 {
+                receipt_state.set("error:image over 8 MB".to_string());
+                return;
+            }
+            let body = json!({
+                "mode": "receipt",
+                "image": {
+                    "base64": B64.encode(&bytes),
+                    "mimeType": if mime.is_empty() { "image/png".to_string() } else { mime },
+                }
+            });
+            match post_json(AI_API_URL, body).await {
+                Ok(v) => {
+                    let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+                    let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+                    if ok && mode == "receipt" {
+                        let items = v
+                            .get("items")
+                            .and_then(|i| i.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|it| {
+                                        Some(ChatItem {
+                                            name: it.get("name")?.as_str()?.to_string(),
+                                            quantity: it
+                                                .get("quantity")
+                                                .and_then(|q| q.as_u64())
+                                                .unwrap_or(1) as u32,
+                                            total_minor: it
+                                                .get("totalMinor")
+                                                .and_then(|t| t.as_i64())
+                                                .unwrap_or(0),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let currency = v
+                            .get("currency")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("THB")
+                            .to_string();
+                        receipt_currency.set(currency);
+                        receipt_items.set(items);
+                        receipt_state.set("ok".to_string());
+                    } else {
+                        let err = v
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("unexpected AI response")
+                            .to_string();
+                        receipt_state.set(format!("error:{err}"));
+                    }
+                }
+                Err(e) => receipt_state.set(format!("error:{e}")),
+            }
+        });
+    };
+
+    // one receipt line → a real create_purchase_request (THB → SOL via live rate)
+    let open_from_receipt = move |item: ChatItem| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let owner = Pubkey::from_str(&pk).expect("connected key");
+            let (household, counter) = match fetch_household_state(&owner).await {
+                Ok(r) => r,
+                Err(e) => {
+                    action_msg.set(format!("⚠ {e}"));
+                    action_busy.set(false);
+                    return;
+                }
+            };
+            let lamports =
+                ((item.total_minor as f64 / 100.0) / sol_thb() * 1e9).round() as u64;
+            if lamports < MIN_REQUEST_LAMPORTS {
+                action_msg.set(format!(
+                    "⚠ {} converts to {} lamports — below the 0.0001 SOL minimum. Raise the price note.",
+                    item.name, lamports
+                ));
+                action_busy.set(false);
+                return;
+            }
+            if lamports > MAX_REQUEST_LAMPORTS {
+                action_msg.set(format!(
+                    "⚠ {} exceeds the 0.5 SOL per-request ceiling. Split the line.",
+                    item.name
+                ));
+                action_busy.set(false);
+                return;
+            }
+            let item_text = if item.quantity > 1 {
+                format!("{} ×{}", item.name, item.quantity)
+            } else {
+                item.name.clone()
+            };
+            let unit_cost = format!("฿{:.2} from receipt", item.total_minor as f64 / 100.0);
+            match execute(
+                &owner,
+                vec![programs::create_purchase_request(
+                    &owner,
+                    &owner, // buyer = self (another member approves on-chain)
+                    counter + 1,
+                    lamports,
+                    programs::text_hash(&item_text),
+                    programs::text_hash(&unit_cost),
+                    &programs::program_id(),
+                )],
+            )
+            .await
+            {
+                Ok(sig) => {
+                    action_msg.set(format!(
+                        "✓ {} opened as request #{} — {}",
+                        item.name,
+                        counter + 1,
+                        &sig[..16.min(sig.len())]
+                    ));
+                    refresh_into(state, ledger, pk).await;
+                }
+                Err(e) => action_msg.set(format!("⚠ {e}")),
+            }
+            action_busy.set(false);
+        });
+    };
+
+
     rsx! {
         main { style: "max-width:640px;margin:48px auto;padding:0 20px;font-family:ui-sans-serif,system-ui;color:#1c1917",
             header {
@@ -1020,6 +1255,53 @@ fn app() -> Element {
                 }
                 p { style: "font-size:11px;color:#a8a29e;margin:0",
                     "Note: create with buyer = you, then approve — the program forbids self-approval, so use a second wallet for the buyer in a real household."
+                }
+            }
+
+            h2 { style: "margin:28px 0 8px;font-size:16px", "🧾 Receipt → requests" }
+            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center",
+                    input {
+                        r#type: "file",
+                        id: "receipt-file",
+                        accept: "image/png,image/jpeg,image/webp",
+                        style: "font-size:12px",
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        onclick: parse_receipt,
+                        disabled: *receipt_state.read() == "loading",
+                        if *receipt_state.read() == "loading" { "Reading…" } else { "Extract items" }
+                    }
+                    span { style: "font-size:11px;color:#78716c",
+                        "1 SOL ≈ ฿{sol_thb():.0} — extracted items convert to SOL automatically"
+                    }
+                }
+                match &*receipt_state.read() {
+                    s if s == "idle" => rsx! { p { style: "font-size:12px;color:#a8a29e;margin:0", "Snap your receipt, pick the photo, and the AI drafts each line as a request." } },
+                    s if s == "loading" => rsx! { p { style: "font-size:12px;color:#a8a29e;margin:0", "The AI is reading the receipt…" } },
+                    s if s.starts_with("error:") => {
+                        let msg = s.trim_start_matches("error:");
+                        rsx! { p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {msg}" } }
+                    },
+                    _ => rsx! {
+                        p { style: "font-size:12px;color:#166534;margin:0", "✓ items extracted — review, then open each request." }
+                    },
+                }
+                div { style: "display:grid;gap:8px",
+                    for item in receipt_items() {
+                        div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid #e7e5e4;border-radius:8px;padding:8px 10px",
+                            span { style: "flex:1;font-size:13px", "{item.name}" }
+                            span { style: "font-size:12px;color:#78716c", "×{item.quantity}" }
+                            span { style: "font-size:12px;font-family:ui-monospace,monospace", "{item.price_label()}" }
+                            button {
+                                style: "padding:6px 12px;border:none;border-radius:8px;background:#059669;color:white;font-size:12px;font-weight:600;cursor:pointer",
+                                onclick: move |_| open_from_receipt(item.clone()),
+                                disabled: action_busy() || wallet_pubkey().is_none(),
+                                "Open request"
+                            }
+                        }
+                    }
                 }
             }
 

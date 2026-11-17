@@ -41,7 +41,12 @@
       reimbursed_amount ตรง; mock verify add_member bytes (disc + role tag +
       ordering) — RIIR parity = 100% ของ household lifecycle (เหลือแค่
       receipt scan)
-- [ ] (ถ้าต้องการ) receipt scan ใน Dioxus — เรียก /api/ai mode receipt
+- [x] v0.7 receipt scan — file input (web-sys) → /api/ai → item chips →
+      "Open request" ต่อบรรทัด (THB→SOL live rate, counter อ่านใหม่จาก
+      chain ต่อ tx) — verify ในเบราว์เซอร์ด้วย fixture (app/public/
+      receipt-test.html): 4 บรรทัด, bytes ที่จับได้ decode ถูกทุกจุด
+      (38,515,908 lamports ≈ ฿94)
+- [ ] (ถ้าต้องการ) styling parity — inline styles ทำงานแล้ว เหลือจัดฟอร์มสวยเท่านั้น
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
 

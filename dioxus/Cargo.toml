@@ -24,6 +24,8 @@ blake3 = "1"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
+# receipt file input (reads the picked File's bytes directly)
+web-sys = { version = "0.3", features = ["HtmlInputElement", "File", "Blob", "Window", "Document"] }
 
 [dev-dependencies]
 # native-only E2E test: signs with a local ed25519 key and executes the real
