@@ -284,6 +284,50 @@ async fn fetch_household_state(owner: &Pubkey) -> Result<(Pubkey, u64), String> 
     Ok((household, u64::from_le_bytes(bytes[77..85].try_into().unwrap())))
 }
 
+/// Theme tokens + dark/light via prefers-color-scheme. Rendered as a <style>
+/// element (the CSS braces can't live inline in rsx text — it's format-parsed).
+const THEME_CSS: &str = r#"
+    :root {
+        --bg: #fafaf9; --surface: #ffffff; --surface-2: #f5f5f4; --surface-3: #fafaf9;
+        --border: #e7e5e4; --border-strong: #d6d3d1;
+        --text: #1c1917; --muted: #78716c; --faint: #a8a29e; --ink-soft: #44403c; --chip-ink-muted: #57534e;
+        --accent: #059669; --teal: #0f766e; --violet: #8250df;
+        --danger: #b91c1c; --danger-bg: #fef2f2; --danger-border: #fecaca; --danger-ink: #991b1b;
+        --success: #166534; --success-bg: #f0fdf4; --success-border: #bbf7d0;
+        --link: #1d4ed8;
+        --warn-bg: #fef3c7; --warn-ink: #92400e;
+        --info-bg: #dbeafe; --info-ink: #1e40af;
+        --violet-bg: #ede9fe; --violet-ink: #5b21b6;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #0c0a09; --surface: #1c1917; --surface-2: #292524; --surface-3: #1c1917;
+            --border: #44403c; --border-strong: #57534e;
+            --text: #f5f5f4; --muted: #a8a29e; --faint: #78716c; --ink-soft: #d6d3d1; --chip-ink-muted: #d6d3d1;
+            --accent: #10b981; --teal: #0d9488; --violet: #a78bfa;
+            --danger: #f87171; --danger-bg: #2c0a0a; --danger-border: #7f1d1d; --danger-ink: #fca5a5;
+            --success: #34d399; --success-bg: #052e16; --success-border: #14532d;
+            --link: #93c5fd;
+            --warn-bg: #451a03; --warn-ink: #fbbf24;
+            --info-bg: #172554; --info-ink: #93c5fd;
+            --violet-bg: #2e1065; --violet-ink: #c4b5fd;
+        }
+    }
+    html { background: var(--bg); }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+    }
+    button { font-family: inherit; }
+    button[disabled] { opacity: 0.45; cursor: not-allowed; }
+    input, select, textarea { color: var(--text); background: var(--surface); border-color: var(--border-strong); }
+    input::placeholder { color: var(--faint); }
+    a { color: var(--link); }
+"#;
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
@@ -917,10 +961,11 @@ fn app() -> Element {
 
 
     rsx! {
-        main { style: "max-width:640px;margin:48px auto;padding:0 20px;font-family:ui-sans-serif,system-ui;color:#1c1917",
+        style { {THEME_CSS} }
+        main { style: "max-width:640px;margin:48px auto;padding:0 20px;font-family:ui-sans-serif,system-ui;color:var(--text)",
             header {
                 h1 { "🤖🏠 Stocksie — RIIR prototype" }
-                p { style: "color:#78716c;font-size:14px",
+                p { style: "color:var(--muted);font-size:14px",
                     "Household reader rewritten in Rust (Dioxus → WASM). "
                     "PDA derivation + borsh decode, zero JavaScript client code."
                 }
@@ -928,13 +973,13 @@ fn app() -> Element {
 
             div { style: "display:flex;gap:8px;margin:16px 0",
                 input {
-                    style: "flex:1;padding:10px;border:1px solid #d6d3d1;border-radius:8px;font-family:ui-monospace,monospace;font-size:13px",
+                    style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-family:ui-monospace,monospace;font-size:13px",
                     value: "{owner_input}",
                     oninput: move |e| owner_input.set(e.value()),
                     placeholder: "Household owner wallet address",
                 }
                 button {
-                    style: "padding:10px 16px;border:none;border-radius:8px;background:#059669;color:white;font-weight:600;cursor:pointer",
+                    style: "padding:10px 16px;border:none;border-radius:8px;background:var(--accent);color:white;font-weight:600;cursor:pointer",
                     onclick: move |_| fetch(owner_input()),
                     "Load household"
                 }
@@ -943,7 +988,7 @@ fn app() -> Element {
             div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px",
                 for (addr, label) in DEMO_OWNERS {
                     button {
-                        style: "padding:6px 10px;border:1px solid #d6d3d1;border-radius:6px;background:#fafaf9;font-size:12px;cursor:pointer",
+                        style: "padding:6px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface-3);font-size:12px;cursor:pointer",
                         onclick: move |_| {
                             owner_input.set(addr.to_string());
                             fetch(addr.to_string());
@@ -954,10 +999,10 @@ fn app() -> Element {
             }
 
             match &*state.read() {
-                FetchState::Idle => rsx! { p { style: "color:#a8a29e", "Enter an owner address (or pick a demo) and load." } },
-                FetchState::Loading => rsx! { p { style: "color:#a8a29e", "Fetching from devnet…" } },
+                FetchState::Idle => rsx! { p { style: "color:var(--faint)", "Enter an owner address (or pick a demo) and load." } },
+                FetchState::Loading => rsx! { p { style: "color:var(--faint)", "Fetching from devnet…" } },
                 FetchState::Failed(msg) => rsx! {
-                    div { style: "padding:12px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;color:#b91c1c;font-size:13px",
+                    div { style: "padding:12px;border:1px solid var(--danger-border);border-radius:8px;background:var(--danger-bg);color:var(--danger);font-size:13px",
                         "⚠ {msg}"
                     }
                 },
@@ -966,32 +1011,32 @@ fn app() -> Element {
 
             h2 { style: "margin:28px 0 8px;font-size:16px", "🛒 Purchase ledger" }
             match &*ledger.read() {
-                LedgerState::Idle => rsx! { p { style: "color:#a8a29e;font-size:13px", "Load a household to see its requests." } },
-                LedgerState::Loading => rsx! { p { style: "color:#a8a29e;font-size:13px", "Reading the ledger from devnet…" } },
+                LedgerState::Idle => rsx! { p { style: "color:var(--faint);font-size:13px", "Load a household to see its requests." } },
+                LedgerState::Loading => rsx! { p { style: "color:var(--faint);font-size:13px", "Reading the ledger from devnet…" } },
                 LedgerState::Failed(msg) => rsx! {
-                    div { style: "padding:12px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;color:#b91c1c;font-size:13px",
+                    div { style: "padding:12px;border:1px solid var(--danger-border);border-radius:8px;background:var(--danger-bg);color:var(--danger);font-size:13px",
                         "⚠ {msg}"
                     }
                 },
                 LedgerState::Loaded(rows) if rows.is_empty() => rsx! {
-                    p { style: "color:#a8a29e;font-size:13px", "No purchase requests for this household yet." }
+                    p { style: "color:var(--faint);font-size:13px", "No purchase requests for this household yet." }
                 },
                 LedgerState::Loaded(rows) => rsx! { LedgerTable { rows: rows.clone() } },
             }
 
             h2 { style: "margin:28px 0 8px;font-size:16px", "👛 Wallet — first signed tx from Rust" }
-            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
-                p { style: "font-size:12px;color:#78716c;margin:0",
+            div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
+                p { style: "font-size:12px;color:var(--muted);margin:0",
                     "Detects window.phantom (Wallet Standard), builds the memo tx wire bytes in Rust, and hands them to the wallet — the wallet fills the signature slot and submits."
                 }
                 match &*wallet_pubkey.read() {
                     Some(pk) => rsx! {
                         div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap",
-                            span { style: "padding:2px 10px;border-radius:9999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:600", "connected" }
+                            span { style: "padding:2px 10px;border-radius:9999px;background:#dcfce7;color:var(--success);font-size:12px;font-weight:600", "connected" }
                             span { style: "font-family:ui-monospace,monospace;font-size:12px", "{pk}" }
                         }
                         button {
-                            style: "padding:8px 14px;border:none;border-radius:8px;background:#059669;color:white;font-weight:600;cursor:pointer",
+                            style: "padding:8px 14px;border:none;border-radius:8px;background:var(--accent);color:white;font-weight:600;cursor:pointer",
                             onclick: send_memo,
                             disabled: matches!(&*send_state.read(), SendState::Building),
                             if matches!(&*send_state.read(), SendState::Building) {
@@ -1003,7 +1048,7 @@ fn app() -> Element {
                     },
                     None => rsx! {
                         button {
-                            style: "padding:8px 14px;border:none;border-radius:8px;background:#8250df;color:white;font-weight:600;cursor:pointer",
+                            style: "padding:8px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
                             onclick: connect_wallet,
                             disabled: *wallet_busy.read(),
                             if *wallet_busy.read() { "Connecting…" } else { "Connect Phantom" }
@@ -1011,41 +1056,41 @@ fn app() -> Element {
                     },
                 }
                 if let Some(err) = &*wallet_error.read() {
-                    p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {err}" }
+                    p { style: "font-size:12px;color:var(--danger);margin:0", "⚠ {err}" }
                 }
                 match &*send_state.read() {
                     SendState::Idle => rsx! {
-                        p { style: "font-size:12px;color:#a8a29e;margin:0",
+                        p { style: "font-size:12px;color:var(--faint);margin:0",
                             "Nothing sent yet — the tx is a SPL Memo v1 with your key as fee payer."
                         }
                     },
                     SendState::Building => rsx! {
-                        p { style: "font-size:12px;color:#a8a29e;margin:0", "Fetching blockhash & building wire bytes…" }
+                        p { style: "font-size:12px;color:var(--faint);margin:0", "Fetching blockhash & building wire bytes…" }
                     },
                     SendState::Failed(e) => rsx! {
-                        p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {e}" }
+                        p { style: "font-size:12px;color:var(--danger);margin:0", "⚠ {e}" }
                     },
                     SendState::Sent(sig) => rsx! {
-                        div { style: "padding:10px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;display:grid;gap:6px",
-                            span { style: "font-size:12px;color:#166534;font-weight:600", "Signed & submitted ✓" }
+                        div { style: "padding:10px;border:1px solid var(--success-border);border-radius:8px;background:var(--success-bg);display:grid;gap:6px",
+                            span { style: "font-size:12px;color:var(--success);font-weight:600", "Signed & submitted ✓" }
                             a {
                                 href: "https://explorer.solana.com/tx/{sig}?cluster=devnet",
                                 target: "_blank",
-                                style: "font-size:12px;color:#1d4ed8",
+                                style: "font-size:12px;color:var(--link)",
                                 "view on Solana Explorer ↗"
                             }
-                            code { style: "font-size:10px;word-break:break-all;color:#78716c", "{sig}" }
+                            code { style: "font-size:10px;word-break:break-all;color:var(--muted)", "{sig}" }
                         }
                     },
                 }
             }
 
             h2 { style: "margin:28px 0 8px;font-size:16px", "🤖 AI agent — same /api/ai as the Next.js app" }
-            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
+            div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
                 div {
-                    style: "max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid #e7e5e4;border-radius:8px;background:#fafaf9",
+                    style: "max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-3)",
                     if chat.len() == 0 {
-                        p { style: "font-size:12px;color:#a8a29e;margin:0",
+                        p { style: "font-size:12px;color:var(--faint);margin:0",
                             "Try “ซื้อนม 2 ขวด งบ 50 บาท” or “งบเหลือเท่าไหร่” — proposals list items; answers use the live household numbers loaded above."
                         }
                     }
@@ -1053,16 +1098,16 @@ fn app() -> Element {
                         div {
                             class: if msg.role == "user" { "align-self:flex-end" } else { "align-self:flex-start" },
                             style: if msg.role == "user" {
-                                "max-width:85%;padding:8px 12px;border-radius:12px 12px 2px 12px;background:#059669;color:white;font-size:13px"
+                                "max-width:85%;padding:8px 12px;border-radius:12px 12px 2px 12px;background:var(--accent);color:white;font-size:13px"
                             } else {
-                                "max-width:90%;padding:8px 12px;border-radius:12px 12px 12px 2px;background:#e7e5e4;color:#1c1917;font-size:13px"
+                                "max-width:90%;padding:8px 12px;border-radius:12px 12px 12px 2px;background:var(--border);color:var(--text);font-size:13px"
                             },
                             "{msg.text}"
                             if !msg.items.is_empty() {
                                 div { style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:8px",
                                     for item in msg.items {
                                         span {
-                                            style: "padding:2px 8px;border-radius:6px;background:#f5f5f4;color:#44403c;font-size:11px;border:1px solid #d6d3d1",
+                                            style: "padding:2px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-soft);font-size:11px;border:1px solid var(--border-strong)",
                                             "{item.label()}"
                                         }
                                     }
@@ -1071,19 +1116,19 @@ fn app() -> Element {
                         }
                     }
                     if chat_busy() {
-                        div { style: "align-self:flex-start;font-size:12px;color:#a8a29e", "Thinking…" }
+                        div { style: "align-self:flex-start;font-size:12px;color:var(--faint)", "Thinking…" }
                     }
                 }
                 div { style: "display:flex;gap:8px",
                     input {
-                        style: "flex:1;padding:10px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                        style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                         value: "{chat_input}",
                         oninput: move |e| chat_input.set(e.value()),
                         placeholder: "Ask the agent… (Thai/English)",
                         disabled: chat_busy(),
                     }
                     button {
-                        style: "padding:10px 16px;border:none;border-radius:8px;background:#8250df;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:10px 16px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
                         onclick: send_chat,
                         disabled: chat_busy() || chat_input().trim().is_empty(),
                         "Send"
@@ -1092,19 +1137,19 @@ fn app() -> Element {
             }
 
             h2 { style: "margin:28px 0 8px;font-size:16px", "🛠 Actions — household ops as Rust wire bytes" }
-            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:12px",
+            div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:12px",
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "flex:1;min-width:200px",
-                        label { style: "font-size:11px;color:#78716c", "Household name" }
+                        label { style: "font-size:11px;color:var(--muted)", "Household name" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                             value: "{name_input}",
                             oninput: move |e| name_input.set(e.value()),
                             placeholder: "บ้านของเรา",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: init_household,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Initialize household"
@@ -1112,16 +1157,16 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "flex:1;min-width:140px",
-                        label { style: "font-size:11px;color:#78716c", "Deposit (SOL)" }
+                        label { style: "font-size:11px;color:var(--muted)", "Deposit (SOL)" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{deposit_input}",
                             oninput: move |e| deposit_input.set(e.value()),
                             placeholder: "0.1",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: deposit,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Deposit"
@@ -1129,25 +1174,25 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "flex:2;min-width:180px",
-                        label { style: "font-size:11px;color:#78716c", "Item to buy" }
+                        label { style: "font-size:11px;color:var(--muted)", "Item to buy" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                             value: "{item_input}",
                             oninput: move |e| item_input.set(e.value()),
                             placeholder: "นมสด 1 ลิตร ×2",
                         }
                     }
                     div { style: "width:120px",
-                        label { style: "font-size:11px;color:#78716c", "Limit (SOL)" }
+                        label { style: "font-size:11px;color:var(--muted)", "Limit (SOL)" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{req_amount_input}",
                             oninput: move |e| req_amount_input.set(e.value()),
                             placeholder: "0.02",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: open_request,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Open request"
@@ -1155,16 +1200,16 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "width:120px",
-                        label { style: "font-size:11px;color:#78716c", "Request #" }
+                        label { style: "font-size:11px;color:var(--muted)", "Request #" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{approve_id_input}",
                             oninput: move |e| approve_id_input.set(e.value()),
                             placeholder: "1",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: approve,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Approve"
@@ -1172,18 +1217,18 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "flex:2;min-width:180px",
-                        label { style: "font-size:11px;color:#78716c", "New member address" }
+                        label { style: "font-size:11px;color:var(--muted)", "New member address" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{member_input}",
                             oninput: move |e| member_input.set(e.value()),
                             placeholder: "Their wallet address",
                         }
                     }
                     div { style: "width:120px",
-                        label { style: "font-size:11px;color:#78716c", "Role" }
+                        label { style: "font-size:11px;color:var(--muted)", "Role" }
                         select {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                             value: "{member_role}",
                             onchange: move |e| member_role.set(e.value()),
                             option { value: "1", "Parent" }
@@ -1192,7 +1237,7 @@ fn app() -> Element {
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: add_member_action,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Add member"
@@ -1200,25 +1245,25 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "width:120px",
-                        label { style: "font-size:11px;color:#78716c", "Request #" }
+                        label { style: "font-size:11px;color:var(--muted)", "Request #" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{restock_id_input}",
                             oninput: move |e| restock_id_input.set(e.value()),
                             placeholder: "1",
                         }
                     }
                     div { style: "flex:1;min-width:180px",
-                        label { style: "font-size:11px;color:#78716c", "What you actually paid" }
+                        label { style: "font-size:11px;color:var(--muted)", "What you actually paid" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                             value: "{restock_cost_input}",
                             oninput: move |e| restock_cost_input.set(e.value()),
                             placeholder: "฿48 at 7-Eleven (buyer signs)",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: confirm_restock_action,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Mark as bought"
@@ -1226,40 +1271,40 @@ fn app() -> Element {
                 }
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "width:120px",
-                        label { style: "font-size:11px;color:#78716c", "Request #" }
+                        label { style: "font-size:11px;color:var(--muted)", "Request #" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{reimb_id_input}",
                             oninput: move |e| reimb_id_input.set(e.value()),
                             placeholder: "1",
                         }
                     }
                     div { style: "width:140px",
-                        label { style: "font-size:11px;color:#78716c", "Pay back (SOL)" }
+                        label { style: "font-size:11px;color:var(--muted)", "Pay back (SOL)" }
                         input {
-                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
                             value: "{reimb_amount_input}",
                             oninput: move |e| reimb_amount_input.set(e.value()),
                             placeholder: "0.005",
                         }
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: reimburse_action,
                         disabled: action_busy() || wallet_pubkey().is_none(),
                         "Reimburse buyer"
                     }
                 }
                 if !action_msg().is_empty() {
-                    p { style: "font-size:12px;margin:0;color:if action_msg().starts_with('✓') { \"#166534\" } else { \"#b91c1c\" }", "{action_msg}" }
+                    p { style: "font-size:12px;margin:0;color:if action_msg().starts_with('✓') { \"var(--success)\" } else { \"var(--danger)\" }", "{action_msg}" }
                 }
-                p { style: "font-size:11px;color:#a8a29e;margin:0",
+                p { style: "font-size:11px;color:var(--faint);margin:0",
                     "Note: create with buyer = you, then approve — the program forbids self-approval, so use a second wallet for the buyer in a real household."
                 }
             }
 
             h2 { style: "margin:28px 0 8px;font-size:16px", "🧾 Receipt → requests" }
-            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
+            div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center",
                     input {
                         r#type: "file",
@@ -1268,34 +1313,34 @@ fn app() -> Element {
                         style: "font-size:12px",
                     }
                     button {
-                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
                         onclick: parse_receipt,
                         disabled: *receipt_state.read() == "loading",
                         if *receipt_state.read() == "loading" { "Reading…" } else { "Extract items" }
                     }
-                    span { style: "font-size:11px;color:#78716c",
+                    span { style: "font-size:11px;color:var(--muted)",
                         "1 SOL ≈ ฿{sol_thb():.0} — extracted items convert to SOL automatically"
                     }
                 }
                 match &*receipt_state.read() {
-                    s if s == "idle" => rsx! { p { style: "font-size:12px;color:#a8a29e;margin:0", "Snap your receipt, pick the photo, and the AI drafts each line as a request." } },
-                    s if s == "loading" => rsx! { p { style: "font-size:12px;color:#a8a29e;margin:0", "The AI is reading the receipt…" } },
+                    s if s == "idle" => rsx! { p { style: "font-size:12px;color:var(--faint);margin:0", "Snap your receipt, pick the photo, and the AI drafts each line as a request." } },
+                    s if s == "loading" => rsx! { p { style: "font-size:12px;color:var(--faint);margin:0", "The AI is reading the receipt…" } },
                     s if s.starts_with("error:") => {
                         let msg = s.trim_start_matches("error:");
-                        rsx! { p { style: "font-size:12px;color:#b91c1c;margin:0", "⚠ {msg}" } }
+                        rsx! { p { style: "font-size:12px;color:var(--danger);margin:0", "⚠ {msg}" } }
                     },
                     _ => rsx! {
-                        p { style: "font-size:12px;color:#166534;margin:0", "✓ items extracted — review, then open each request." }
+                        p { style: "font-size:12px;color:var(--success);margin:0", "✓ items extracted — review, then open each request." }
                     },
                 }
                 div { style: "display:grid;gap:8px",
                     for item in receipt_items() {
-                        div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid #e7e5e4;border-radius:8px;padding:8px 10px",
+                        div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid var(--border);border-radius:8px;padding:8px 10px",
                             span { style: "flex:1;font-size:13px", "{item.name}" }
-                            span { style: "font-size:12px;color:#78716c", "×{item.quantity}" }
+                            span { style: "font-size:12px;color:var(--muted)", "×{item.quantity}" }
                             span { style: "font-size:12px;font-family:ui-monospace,monospace", "{item.price_label()}" }
                             button {
-                                style: "padding:6px 12px;border:none;border-radius:8px;background:#059669;color:white;font-size:12px;font-weight:600;cursor:pointer",
+                                style: "padding:6px 12px;border:none;border-radius:8px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer",
                                 onclick: move |_| open_from_receipt(item.clone()),
                                 disabled: action_busy() || wallet_pubkey().is_none(),
                                 "Open request"
@@ -1305,7 +1350,7 @@ fn app() -> Element {
                 }
             }
 
-            footer { style: "margin-top:40px;color:#a8a29e;font-size:11px;border-top:1px solid #e7e5e4;padding-top:12px",
+            footer { style: "margin-top:40px;color:var(--faint);font-size:11px;border-top:1px solid var(--border);padding-top:12px",
                 "Privacy note: the household name never lands on-chain — the contract stores a blake3 fingerprint only, decoded here as hex. "
                 "Program: " {PROGRAM_ID}
             }
@@ -1316,8 +1361,8 @@ fn app() -> Element {
 #[component]
 fn HouseholdCard(view: HouseholdView) -> Element {
     rsx! {
-        div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:20px;display:grid;gap:10px",
-            h2 { style: "margin:0;font-size:18px", "Household " span { style: "color:#059669", "✓ live on devnet" } }
+        div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:20px;display:grid;gap:10px",
+            h2 { style: "margin:0;font-size:18px", "Household " span { style: "color:var(--accent)", "✓ live on devnet" } }
             Row { label: "Household PDA".to_string(), value: view.pda.clone() }
             Row { label: "Vault balance".to_string(), value: format!("{} SOL (account lamports)", view.lamports_sol) }
             Row { label: "Mirror field vault_balance".to_string(), value: format!("{} lamports", view.vault_balance_mirror) }
@@ -1335,7 +1380,7 @@ fn HouseholdCard(view: HouseholdView) -> Element {
 fn Row(label: String, value: String) -> Element {
     rsx! {
         div { style: "display:flex;justify-content:space-between;gap:12px;font-size:13px",
-            span { style: "color:#78716c", "{label}" }
+            span { style: "color:var(--muted)", "{label}" }
             span { style: "font-family:ui-monospace,monospace;word-break:break-all;text-align:right", "{value}" }
         }
     }
@@ -1343,22 +1388,22 @@ fn Row(label: String, value: String) -> Element {
 
 fn status_style(status: &str) -> &'static str {
     match status {
-        "waiting" => "background:#fef3c7;color:#92400e",
-        "approved" => "background:#dbeafe;color:#1e40af",
-        "restocked" => "background:#ede9fe;color:#5b21b6",
-        "reimbursed" => "background:#dcfce7;color:#166534",
-        "rejected" => "background:#fee2e2;color:#991b1b",
-        _ => "background:#f5f5f4;color:#57534e",
+        "waiting" => "background:var(--warn-bg);color:var(--warn-ink)",
+        "approved" => "background:var(--info-bg);color:var(--info-ink)",
+        "restocked" => "background:var(--violet-bg);color:var(--violet-ink)",
+        "reimbursed" => "background:#dcfce7;color:var(--success)",
+        "rejected" => "background:var(--danger-bg);color:var(--danger-ink)",
+        _ => "background:var(--surface-2);color:var(--chip-ink-muted)",
     }
 }
 
 #[component]
 fn LedgerTable(rows: Vec<RequestView>) -> Element {
     rsx! {
-        div { style: "border:1px solid #d6d3d1;border-radius:12px;overflow:hidden",
+        div { style: "border:1px solid var(--border-strong);border-radius:12px;overflow:hidden",
             table { style: "width:100%;border-collapse:collapse;font-size:12px",
                 thead {
-                    tr { style: "background:#fafaf9;text-align:left",
+                    tr { style: "background:var(--surface-3);text-align:left",
                         th { style: "padding:8px 10px", "#" }
                         th { style: "padding:8px 10px", "Status" }
                         th { style: "padding:8px 10px", "Spending limit" }
@@ -1369,7 +1414,7 @@ fn LedgerTable(rows: Vec<RequestView>) -> Element {
                 }
                 tbody {
                     for row in rows {
-                        tr { style: "border-top:1px solid #e7e5e4",
+                        tr { style: "border-top:1px solid var(--border)",
                             td { style: "padding:8px 10px;font-family:ui-monospace,monospace", "#{row.request_id}" }
                             td { style: "padding:8px 10px",
                                 span {
@@ -1380,7 +1425,7 @@ fn LedgerTable(rows: Vec<RequestView>) -> Element {
                             td { style: "padding:8px 10px;font-family:ui-monospace,monospace", "{row.amount_sol} SOL" }
                             td { style: "padding:8px 10px;font-family:ui-monospace,monospace", title: "{row.buyer}", "{row.buyer}" }
                             td { style: "padding:8px 10px", "{row.reward_earned} pts" }
-                            td { style: "padding:8px 10px;color:#78716c", "slot {row.created_slot}" }
+                            td { style: "padding:8px 10px;color:var(--muted)", "slot {row.created_slot}" }
                         }
                     }
                 }

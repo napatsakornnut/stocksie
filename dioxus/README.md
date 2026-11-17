@@ -59,6 +59,10 @@ code.
   extracted, first line captured as a 415-byte tx whose discriminator,
   amount (38,515,908 lamports ≈ ฿94 at the live rate), and self-buy key
   dedupe all decode correctly.
+- **Theming (v0.8)**: all inline colors moved to CSS variables (stone
+  palette, `prefers-color-scheme` dark/light) rendered via a `<style>`
+  element — the CSS can't live inline in rsx text (format-parsed) so it's a
+  const rendered as an expression child.
 
 ## Run it
 
