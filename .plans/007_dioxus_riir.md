@@ -35,8 +35,13 @@
       ทุกขั้น (บั๊กที่ E2E จับได้: program idx ไม่ remap, key sort 2 กลุ่ม
       ทำ owner_member หลุดโซน writable, buyer ต้อง add_member ก่อน +
       self-approval ถูกแบน)
-- [ ] (ถ้าต้องการ) wire ฟอร์มเหลือๆ: add_member UI, confirm_restock,
-      reimburse — pattern เดียวกันทั้งหมด
+- [x] v0.6 action parity ครบ — confirm_restock (buyer เซ็นเอง) +
+      reimburse_buyer (owner จ่าย, buyer resolve จาก ledger) + add_member UI
+      (role select) — E2E 6 ขั้นผ่านจน status = Reimbursed และ
+      reimbursed_amount ตรง; mock verify add_member bytes (disc + role tag +
+      ordering) — RIIR parity = 100% ของ household lifecycle (เหลือแค่
+      receipt scan)
+- [ ] (ถ้าต้องการ) receipt scan ใน Dioxus — เรียก /api/ai mode receipt
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
 

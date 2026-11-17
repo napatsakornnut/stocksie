@@ -94,6 +94,7 @@ struct RequestView {
     amount_sol: String,
     status: &'static str,
     buyer: String,
+    buyer_key: Pubkey,
     reward_earned: u64,
     created_slot: u64,
 }
@@ -236,6 +237,12 @@ fn app() -> Element {
     let mut item_input = use_signal(String::new);
     let mut req_amount_input = use_signal(String::new);
     let mut approve_id_input = use_signal(String::new);
+    let mut member_input = use_signal(String::new);
+    let mut member_role = use_signal(|| "2".to_string()); // Child by default
+    let mut restock_id_input = use_signal(String::new);
+    let mut restock_cost_input = use_signal(String::new);
+    let mut reimb_id_input = use_signal(String::new);
+    let mut reimb_amount_input = use_signal(String::new);
     let mut chat = use_signal(Vec::new);
     let mut chat_input = use_signal(String::new);
     let mut chat_busy = use_signal(|| false);
@@ -440,6 +447,127 @@ fn app() -> Element {
                 Ok(sig) => {
                     action_msg.set(format!("✓ approved — {}", &sig[..16.min(sig.len())]));
                     refresh_into(state, ledger, pk).await;
+                }
+                Err(e) => action_msg.set(format!("⚠ {e}")),
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let add_member_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(new_member) = Pubkey::from_str(member_input().trim()) else {
+                action_msg.set("⚠ Invalid member address.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(role_tag) = member_role().parse::<u8>() else {
+                action_msg.set("⚠ Pick a role.".into());
+                action_busy.set(false);
+                return;
+            };
+            let owner = Pubkey::from_str(&pk).expect("connected key");
+            match execute(&owner, vec![programs::add_member(&owner, &new_member, role_tag, &programs::program_id())]).await {
+                Ok(sig) => {
+                    action_msg.set(format!("✓ member added — {}", &sig[..16.min(sig.len())]));
+                    refresh_into(state, ledger, pk).await;
+                }
+                Err(e) => action_msg.set(format!("⚠ {e}")),
+            }
+            action_busy.set(false);
+        });
+    };
+
+    // buyer signs; the household comes from the admin address field above
+    let confirm_restock_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(request_id) = restock_id_input().trim().parse::<u64>() else {
+                action_msg.set("⚠ Enter the request number.".into());
+                action_busy.set(false);
+                return;
+            };
+            let cost = restock_cost_input().trim().to_string();
+            if cost.is_empty() {
+                action_msg.set("⚠ Enter what you actually paid.".into());
+                action_busy.set(false);
+                return;
+            }
+            let buyer = Pubkey::from_str(&pk).expect("connected key");
+            let owner = Pubkey::from_str(&owner_input()).expect("admin address");
+            match execute(
+                &buyer,
+                vec![programs::confirm_restock(&owner, &buyer, request_id, programs::text_hash(&cost), &programs::program_id())],
+            )
+            .await
+            {
+                Ok(sig) => {
+                    action_msg.set(format!("✓ restocked — {}", &sig[..16.min(sig.len())]));
+                    refresh_into(state, ledger, owner_input()).await;
+                }
+                Err(e) => action_msg.set(format!("⚠ {e}")),
+            }
+            action_busy.set(false);
+        });
+    };
+
+    // owner/parent signs; the buyer receives the payout
+    let reimburse_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(request_id) = reimb_id_input().trim().parse::<u64>() else {
+                action_msg.set("⚠ Enter the request number.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Some(lamports) = parse_sol_to_lamports(&reimb_amount_input()) else {
+                action_msg.set("⚠ Enter a valid SOL amount.".into());
+                action_busy.set(false);
+                return;
+            };
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let owner = Pubkey::from_str(&owner_input()).expect("admin address");
+            // buyer pubkey resolved from the loaded ledger (decoded on-chain)
+            let buyer = match &*ledger.read() {
+                LedgerState::Loaded(rows) => rows
+                    .iter()
+                    .find(|r| r.request_id == request_id)
+                    .map(|r| r.buyer_key),
+                _ => None,
+            };
+            let Some(buyer) = buyer else {
+                action_msg.set("⚠ Request not found in the ledger — load the household first.".into());
+                action_busy.set(false);
+                return;
+            };
+            match execute(
+                &caller,
+                vec![programs::reimburse_buyer(&owner, &caller, &buyer, request_id, lamports, &programs::program_id())],
+            )
+            .await
+            {
+                Ok(sig) => {
+                    action_msg.set(format!("✓ reimbursed — {}", &sig[..16.min(sig.len())]));
+                    refresh_into(state, ledger, owner_input()).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -807,6 +935,86 @@ fn app() -> Element {
                         "Approve"
                     }
                 }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "flex:2;min-width:180px",
+                        label { style: "font-size:11px;color:#78716c", "New member address" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{member_input}",
+                            oninput: move |e| member_input.set(e.value()),
+                            placeholder: "Their wallet address",
+                        }
+                    }
+                    div { style: "width:120px",
+                        label { style: "font-size:11px;color:#78716c", "Role" }
+                        select {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            value: "{member_role}",
+                            onchange: move |e| member_role.set(e.value()),
+                            option { value: "1", "Parent" }
+                            option { value: "2", "Child" }
+                            option { value: "3", "Guest" }
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        onclick: add_member_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Add member"
+                    }
+                }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "width:120px",
+                        label { style: "font-size:11px;color:#78716c", "Request #" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{restock_id_input}",
+                            oninput: move |e| restock_id_input.set(e.value()),
+                            placeholder: "1",
+                        }
+                    }
+                    div { style: "flex:1;min-width:180px",
+                        label { style: "font-size:11px;color:#78716c", "What you actually paid" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                            value: "{restock_cost_input}",
+                            oninput: move |e| restock_cost_input.set(e.value()),
+                            placeholder: "฿48 at 7-Eleven (buyer signs)",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        onclick: confirm_restock_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Mark as bought"
+                    }
+                }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "width:120px",
+                        label { style: "font-size:11px;color:#78716c", "Request #" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{reimb_id_input}",
+                            oninput: move |e| reimb_id_input.set(e.value()),
+                            placeholder: "1",
+                        }
+                    }
+                    div { style: "width:140px",
+                        label { style: "font-size:11px;color:#78716c", "Pay back (SOL)" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{reimb_amount_input}",
+                            oninput: move |e| reimb_amount_input.set(e.value()),
+                            placeholder: "0.005",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer",
+                        onclick: reimburse_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Reimburse buyer"
+                    }
+                }
                 if !action_msg().is_empty() {
                     p { style: "font-size:12px;margin:0;color:if action_msg().starts_with('✓') { \"#166534\" } else { \"#b91c1c\" }", "{action_msg}" }
                 }
@@ -1034,6 +1242,7 @@ async fn load_ledger(household: &Pubkey) -> Result<Vec<RequestView>, String> {
                     format!("{}…{}", &s[..6], &s[s.len() - 4..])
                 })
                 .unwrap_or_else(|_| "decode error".into()),
+            buyer_key: Pubkey::try_from(&bytes[40..72]).unwrap_or_default(),
             reward_earned: u64_at(209),
             created_slot: u64_at(218),
         });
@@ -1307,6 +1516,58 @@ mod e2e {
         );
         let req_data = decode(res["result"]["value"]["data"][0].as_str().expect("b64"));
         assert_eq!(req_data[152], 1, "status must be Approved (1)");
+
+        // 5. confirm_restock — signed BY the buyer (fee money: airdrop)
+        rpc(
+            LOCALNET,
+            json!({"jsonrpc":"2.0","id":1,"method":"requestAirdrop","params":[buyer.to_string(), 200_000_000u64]}),
+        );
+        let mut buyer_funded = false;
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let bal = rpc(
+                LOCALNET,
+                json!({"jsonrpc":"2.0","id":1,"method":"getBalance","params":[buyer.to_string()]}),
+            );
+            if bal["result"]["value"].as_u64().unwrap_or(0) >= 10_000 {
+                buyer_funded = true;
+                break;
+            }
+        }
+        assert!(buyer_funded, "buyer airdrop did not land");
+        let wire = tx::build_wire_tx(
+            &buyer,
+            &blockhash,
+            &[programs::confirm_restock(&owner, &buyer, 1, programs::text_hash("฿48 actual"), &program)],
+        );
+        send_and_confirm(&buyer_wallet, &wire);
+        let req_data = {
+            let res = rpc(
+                LOCALNET,
+                json!({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[req.to_string(), {"encoding":"base64","commitment":"confirmed"}]}),
+            );
+            decode(res["result"]["value"]["data"][0].as_str().expect("b64"))
+        };
+        assert_eq!(req_data[152], 2, "status must be Restocked (2)");
+
+        // 6. reimburse_buyer 0.005 SOL (≤ the 0.01 SOL limit) — by the owner
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::reimburse_buyer(&owner, &owner, &buyer, 1, 5_000_000, &program)],
+        );
+        send_and_confirm(&wallet, &wire);
+        let res = rpc(
+            LOCALNET,
+            json!({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[req.to_string(), {"encoding":"base64","commitment":"confirmed"}]}),
+        );
+        let req_data = decode(res["result"]["value"]["data"][0].as_str().expect("b64"));
+        assert_eq!(req_data[152], 3, "status must be Reimbursed (3)");
+        assert_eq!(
+            u64::from_le_bytes(req_data[201..209].try_into().unwrap()),
+            5_000_000,
+            "reimbursed_amount mirror"
+        );
         println!("E2E OK — full household lifecycle executed from Rust wire bytes");
     }
 }

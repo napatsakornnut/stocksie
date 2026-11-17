@@ -56,6 +56,8 @@ const DISC_DEPOSIT_FUNDS: [u8; 8] = [202, 39, 52, 211, 53, 20, 250, 88];
 const DISC_CREATE_PURCHASE_REQUEST: [u8; 8] = [154, 78, 58, 3, 144, 59, 248, 157];
 const DISC_APPROVE_PURCHASE_REQUEST: [u8; 8] = [120, 116, 66, 219, 241, 134, 110, 193];
 const DISC_ADD_MEMBER: [u8; 8] = [13, 116, 123, 130, 126, 198, 57, 34];
+const DISC_CONFIRM_RESTOCK: [u8; 8] = [168, 30, 4, 173, 92, 59, 24, 106];
+const DISC_REIMBURSE_BUYER: [u8; 8] = [194, 20, 70, 81, 246, 45, 24, 35];
 
 /// initialize_household(household(w), owner_member(w), owner(w,s), system)
 /// args: name_hash [u8;32]
@@ -159,6 +161,62 @@ pub fn add_member(
             (crate::tx::system_program(), false, false),
         ],
         &args,
+    )
+}
+
+/// confirm_restock(household(w), buyer_member(w), request(w), buyer(s))
+/// args: unit_cost_hash [u8;32] — signed BY the buyer. `owner` seeds the
+/// household PDA (the buyer is just a member of that household).
+pub fn confirm_restock(
+    owner: &Pubkey,
+    buyer: &Pubkey,
+    request_id: u64,
+    unit_cost_hash: [u8; 32],
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(owner, program).0;
+    let buyer_member = member_pda(&household, buyer, program);
+    let request = purchase_pda(&household, request_id, program);
+    ix(
+        program,
+        DISC_CONFIRM_RESTOCK,
+        vec![
+            (household, true, false),
+            (buyer_member, true, false),
+            (request, true, false),
+            (*buyer, false, true),
+        ],
+        &unit_cost_hash,
+    )
+}
+
+/// reimburse_buyer(household(w), caller_member(ro), request(w),
+/// buyer_member(w), buyer(w), caller(s)) args: lamports u64 — Owner/Parent
+/// only. `owner` seeds the household; `caller` signs (may be a Parent).
+pub fn reimburse_buyer(
+    owner: &Pubkey,
+    caller: &Pubkey,
+    buyer: &Pubkey,
+    request_id: u64,
+    lamports: u64,
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(owner, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let request = purchase_pda(&household, request_id, program);
+    let buyer_member = member_pda(&household, buyer, program);
+    ix(
+        program,
+        DISC_REIMBURSE_BUYER,
+        vec![
+            (household, true, false),
+            (caller_member, false, false),
+            (request, true, false),
+            (buyer_member, true, false),
+            (*buyer, true, false),
+            (*caller, false, true),
+        ],
+        &lamports.to_le_bytes(),
     )
 }
 

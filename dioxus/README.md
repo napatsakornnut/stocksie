@@ -35,17 +35,21 @@ code.
   live through the Dioxus UI: grounded budget answers (numbers from the
   household/ledger loaded above) and Thai purchase proposals rendered as
   item chips.
-- **Household actions (v0.5)**: initialize / deposit / open request /
-  approve — each built as an Anchor instruction (discriminators from the
-  IDL, blake3 text hashes, PDA derivation) and compiled through the shared
-  wire builder. **Proven against the real program**: a native E2E test
-  (`tests` in `src/main.rs`) signs with a throwaway ed25519 key and executes
-  the full lifecycle on localnet — init → deposit → add_member → create →
-  approve — asserting decoded on-chain state after every step. Three wire
-  bugs the E2E caught and killed: program index must be remapped after the
-  key sort; keys must sort signers → writable → readonly (the runtime reads
-  writability by position); a buyer must be added as a member first
-  (add_member) and cannot approve their own request.
+- **Household actions (v0.5/v0.6)**: the full lifecycle — initialize /
+  deposit / add_member / open request / approve / **confirm_restock (buyer
+  signs) / reimburse_buyer (owner pays)** — each built as an Anchor
+  instruction (discriminators from the IDL, blake3 text hashes, PDA
+  derivation) and compiled through the shared wire builder. **Proven against
+  the real program**: a native E2E test (`tests` in `src/main.rs`) signs
+  with throwaway ed25519 keys (owner AND buyer) and executes the whole
+  lifecycle on localnet — asserting decoded on-chain state after every step
+  (member count, vault mirror, request counter, status tags, reimbursed
+  amount). Three wire bugs the E2E caught and killed: program index must be
+  remapped after the key sort; keys must sort signers → writable → readonly
+  (the runtime reads writability by position); a buyer must be added as a
+  member first (add_member) and cannot approve their own request.
+  Household-PDA derivation always goes through the ADMIN address, never the
+  signing member's — a bug class the E2E surfaced twice.
 
 ## Run it
 
