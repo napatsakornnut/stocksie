@@ -10,6 +10,12 @@
 //   AI_VISION_MODEL  default gpt-4o-mini (receipt mode)
 //   AI_TEXT_MODEL    default gpt-4o-mini (chat mode)
 //
+// CORS is **origin-gated**: same-origin works as always, and cross-origin
+// clients (the Dioxus prototype served on its own port) are admitted only if
+// their Origin appears in AI_ALLOWED_ORIGINS (comma-separated). Default empty
+// = no cross-origin access, so a deployed key can't be borrowed by random
+// websites.
+//
 // The route has NO chain access. It converts images / text into validated
 // intent JSON (lib/ai.ts normalizers) and the browser is what signs and sends
 // the Solana transactions — the security model is "AI proposes, the household
@@ -49,6 +55,47 @@ function aiConfig(): AiConfig | null {
     visionModel: process.env.AI_VISION_MODEL?.trim() || "gpt-4o-mini",
     textModel: process.env.AI_TEXT_MODEL?.trim() || "gpt-4o-mini",
   };
+}
+
+/**
+ * CORS headers only when the request's Origin is explicitly admitted via
+ * AI_ALLOWED_ORIGINS — everything else stays same-origin, so the hosted
+ * endpoint can't be borrowed as a free AI proxy by arbitrary sites.
+ */
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin") ?? "";
+  if (!origin) return {};
+  const allowed = (process.env.AI_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!allowed.includes(origin)) return {};
+  return { "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+}
+
+function respond(
+  request: Request,
+  body: Record<string, unknown>,
+  status: number
+) {
+  return NextResponse.json(body, { status, headers: corsHeaders(request) });
+}
+
+// Preflight for cross-origin POSTs (Content-Type: application/json triggers one).
+export async function OPTIONS(request: Request) {
+  const headers = corsHeaders(request);
+  if (Object.keys(headers).length === 0) {
+    return new NextResponse(null, { status: 204 });
+  }
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      ...headers,
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Max-Age": "600",
+    },
+  });
 }
 
 type ChatPart =
@@ -153,12 +200,13 @@ function extractJson(content: string): unknown {
 export async function POST(request: Request) {
   const cfg = aiConfig();
   if (!cfg) {
-    return NextResponse.json(
+    return respond(
+      request,
       {
         error:
           "AI is not configured on this server. Set AI_API_KEY (and optionally AI_BASE_URL / AI_VISION_MODEL / AI_TEXT_MODEL) — any OpenAI-compatible endpoint works.",
       },
-      { status: 501 }
+      501
     );
   }
 
@@ -166,13 +214,13 @@ export async function POST(request: Request) {
   try {
     parsedBody = parseAgentRequest(await request.json());
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    return respond(request, { error: "Invalid JSON body." }, 400);
   }
   if (parsedBody === null) {
-    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+    return respond(request, { error: "Invalid request body." }, 400);
   }
   if ("error" in parsedBody) {
-    return NextResponse.json({ error: parsedBody.error }, { status: 400 });
+    return respond(request, { error: parsedBody.error }, 400);
   }
 
   const messages = buildMessages(parsedBody);
@@ -187,25 +235,27 @@ export async function POST(request: Request) {
     if (parsedBody.mode === "receipt") {
       const parse: ReceiptParse | null = parseReceiptReply(raw);
       if (!parse) {
-        return NextResponse.json(
+        return respond(
+          request,
           { error: "Could not find any purchasable items in that image." },
-          { status: 422 }
+          422
         );
       }
-      return NextResponse.json({ ok: true, mode: "receipt", ...parse });
+      return respond(request, { ok: true, mode: "receipt", ...parse }, 200);
     }
 
     const intent: AgentIntent | null = parseChatReply(raw);
     if (!intent) {
-      return NextResponse.json(
+      return respond(
+        request,
         { error: "The assistant reply was not actionable — try rephrasing." },
-        { status: 422 }
+        422
       );
     }
-    return NextResponse.json({ ok: true, mode: "chat", ...intent });
+    return respond(request, { ok: true, mode: "chat", ...intent }, 200);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Unknown AI provider failure.";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return respond(request, { error: message }, 502);
   }
 }

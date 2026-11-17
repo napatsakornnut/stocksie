@@ -29,6 +29,12 @@ code.
   Verified with an injected mock provider (captured wire bytes =
   byte-identical to a web3.js reconstruction, 209 bytes incl. live devnet
   blockhash) — try it with real Phantom in your Chrome.
+- **AI agent UI (v0.4)**: chat box calling the existing `/api/ai` route —
+  the route gained origin-gated CORS (`AI_ALLOWED_ORIGINS`, default empty =
+  same-origin only, so the hosted key stays private). Both intents verified
+  live through the Dioxus UI: grounded budget answers (numbers from the
+  household/ledger loaded above) and Thai purchase proposals rendered as
+  item chips.
 
 ## Run it
 

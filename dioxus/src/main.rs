@@ -37,6 +37,15 @@ use std::str::FromStr;
 /// Stocksie program (deployed on devnet — see docs/DEPLOY_DEVNET.md).
 const PROGRAM_ID: &str = "At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj";
 
+/// The Next.js AI route (plan 005). The route admits cross-origin POSTs only
+/// from origins listed in AI_ALLOWED_ORIGINS on the server — see
+/// app/src/app/api/ai/route.ts. Point this at the hosted URL to reuse that
+/// deployment instead of a local dev server.
+const AI_API_URL: &str = "http://localhost:3000/api/ai";
+
+/// Devnet JSON-RPC endpoint (the prototype targets devnet like the hosted app).
+const RPC_URL: &str = "https://api.devnet.solana.com";
+
 /// Households to try out of the box (owner address, label).
 const DEMO_OWNERS: [(&str, &str); 2] = [
     (
@@ -104,6 +113,32 @@ enum SendState {
     Failed(String),
 }
 
+/// One AI-agent conversation turn (plan 005 chat contract, client side).
+#[derive(Clone, Debug, PartialEq)]
+struct ChatMsg {
+    role: &'static str, // "user" | "assistant"
+    text: String,
+    items: Vec<ChatItem>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ChatItem {
+    name: String,
+    quantity: u32,
+    total_minor: i64,
+}
+
+impl ChatItem {
+    fn label(&self) -> String {
+        format!(
+            "{} ×{} · ฿{:.2}",
+            self.name,
+            self.quantity,
+            self.total_minor as f64 / 100.0
+        )
+    }
+}
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
@@ -112,6 +147,9 @@ fn app() -> Element {
     let mut wallet_error = use_signal(|| None::<String>);
     let mut wallet_busy = use_signal(|| false);
     let mut send_state = use_signal(|| SendState::Idle);
+    let mut chat = use_signal(Vec::new);
+    let mut chat_input = use_signal(String::new);
+    let mut chat_busy = use_signal(|| false);
 
     let connect_wallet = move |_| {
         spawn(async move {
@@ -174,6 +212,106 @@ fn app() -> Element {
                     Err(e) => send_state.set(SendState::Failed(e)),
                 },
             }
+        });
+    };
+
+    let send_chat = move |_| {
+        spawn(async move {
+            let text = chat_input().trim().to_string();
+            if text.is_empty() || chat_busy() {
+                return;
+            }
+            chat_input.set(String::new());
+            chat.push(ChatMsg { role: "user", text: text.clone(), items: vec![] });
+            chat_busy.set(true);
+
+            // Grounding context: read household/ledger state BEFORE any await
+            // (signals can't be held across awaits in Dioxus).
+            let (vault, pending, members, recent) = {
+                let st = state.read();
+                let (vault, members) = match &*st {
+                    FetchState::Loaded(v) => (v.lamports_sol.clone(), v.member_count),
+                    _ => ("unknown".to_string(), 0),
+                };
+                let lg = ledger.read();
+                let rows: Vec<RequestView> = match &*lg {
+                    LedgerState::Loaded(rows) => rows.clone(),
+                    _ => Vec::new(),
+                };
+                let pending = rows
+                    .iter()
+                    .filter(|r| r.status == "waiting")
+                    .count();
+                let recent: Vec<String> = rows
+                    .iter()
+                    .take(5)
+                    .map(|r| format!("#{} {} for {} SOL", r.request_id, r.status, r.amount_sol))
+                    .collect();
+                (vault, pending, members, recent)
+            };
+
+            let body = json!({
+                "mode": "chat",
+                "text": text,
+                "context": {
+                    "vaultBalanceSol": vault,
+                    "pendingRequestCount": pending,
+                    "memberCount": members,
+                    "recentRequests": recent,
+                }
+            });
+            match post_json(AI_API_URL, body).await {
+                Ok(v) => {
+                    let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+                    let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+                    if ok && mode == "chat" {
+                        let reply = v
+                            .get("reply")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let items = v
+                            .get("items")
+                            .and_then(|i| i.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|it| {
+                                        Some(ChatItem {
+                                            name: it.get("name")?.as_str()?.to_string(),
+                                            quantity: it
+                                                .get("quantity")
+                                                .and_then(|q| q.as_u64())
+                                                .unwrap_or(1) as u32,
+                                            total_minor: it
+                                                .get("totalMinor")
+                                                .and_then(|t| t.as_i64())
+                                                .unwrap_or(0),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        chat.push(ChatMsg { role: "assistant", text: reply, items });
+                    } else {
+                        let err = v
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("unexpected AI response")
+                            .to_string();
+                        chat.push(ChatMsg {
+                            role: "assistant",
+                            text: format!("⚠ {err}"),
+                            items: vec![],
+                        });
+                    }
+                }
+                Err(e) => chat.push(ChatMsg {
+                    role: "assistant",
+                    text: format!("⚠ {e}"),
+                    items: vec![],
+                }),
+            }
+            chat_busy.set(false);
         });
     };
 
@@ -322,6 +460,57 @@ fn app() -> Element {
                             code { style: "font-size:10px;word-break:break-all;color:#78716c", "{sig}" }
                         }
                     },
+                }
+            }
+
+            h2 { style: "margin:28px 0 8px;font-size:16px", "🤖 AI agent — same /api/ai as the Next.js app" }
+            div { style: "border:1px solid #d6d3d1;border-radius:12px;padding:16px;display:grid;gap:10px",
+                div {
+                    style: "max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid #e7e5e4;border-radius:8px;background:#fafaf9",
+                    if chat.len() == 0 {
+                        p { style: "font-size:12px;color:#a8a29e;margin:0",
+                            "Try “ซื้อนม 2 ขวด งบ 50 บาท” or “งบเหลือเท่าไหร่” — proposals list items; answers use the live household numbers loaded above."
+                        }
+                    }
+                    for msg in chat() {
+                        div {
+                            class: if msg.role == "user" { "align-self:flex-end" } else { "align-self:flex-start" },
+                            style: if msg.role == "user" {
+                                "max-width:85%;padding:8px 12px;border-radius:12px 12px 2px 12px;background:#059669;color:white;font-size:13px"
+                            } else {
+                                "max-width:90%;padding:8px 12px;border-radius:12px 12px 12px 2px;background:#e7e5e4;color:#1c1917;font-size:13px"
+                            },
+                            "{msg.text}"
+                            if !msg.items.is_empty() {
+                                div { style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:8px",
+                                    for item in msg.items {
+                                        span {
+                                            style: "padding:2px 8px;border-radius:6px;background:#f5f5f4;color:#44403c;font-size:11px;border:1px solid #d6d3d1",
+                                            "{item.label()}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if chat_busy() {
+                        div { style: "align-self:flex-start;font-size:12px;color:#a8a29e", "Thinking…" }
+                    }
+                }
+                div { style: "display:flex;gap:8px",
+                    input {
+                        style: "flex:1;padding:10px;border:1px solid #d6d3d1;border-radius:8px;font-size:13px",
+                        value: "{chat_input}",
+                        oninput: move |e| chat_input.set(e.value()),
+                        placeholder: "Ask the agent… (Thai/English)",
+                        disabled: chat_busy(),
+                    }
+                    button {
+                        style: "padding:10px 16px;border:none;border-radius:8px;background:#8250df;color:white;font-weight:600;cursor:pointer",
+                        onclick: send_chat,
+                        disabled: chat_busy() || chat_input().trim().is_empty(),
+                        "Send"
+                    }
                 }
             }
 
@@ -555,25 +744,28 @@ async fn load_ledger(household: &Pubkey) -> Result<Vec<RequestView>, String> {
 /// Generic JSON-RPC POST against the devnet endpoint, unwrapping the
 /// `result` envelope (or surfacing the error object verbatim).
 async fn rpc_call(body: serde_json::Value) -> Result<serde_json::Value, String> {
-    let resp = Request::post("https://api.devnet.solana.com")
-        .json(&body)
-        .map_err(|e| format!("RPC body encode failed: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("RPC request failed: {e}"))?;
-    if resp.status() != 200 {
-        return Err(format!("RPC returned HTTP {}", resp.status()));
-    }
-    let text = resp.text().await.map_err(|e| format!("RPC read failed: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("bad JSON from RPC: {e}"))?;
-    if let Some(err) = value.get("error") {
+    let result = post_json(RPC_URL, body).await?;
+    if let Some(err) = result.get("error") {
         return Err(format!("devnet RPC error: {err}"));
     }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| format!("unexpected RPC response: {}", &text[..text.len().min(160)]))
+    result.get("result").cloned().ok_or_else(|| {
+        "unexpected RPC response (missing result envelope)".to_string()
+    })
+}
+
+/// POST a JSON body anywhere and parse the JSON reply.
+async fn post_json(url: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let resp = Request::post(url)
+        .json(&body)
+        .map_err(|e| format!("body encode failed: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("request to {url} failed: {e}"))?;
+    if resp.status() != 200 {
+        return Err(format!("{} returned HTTP {}", url, resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("bad JSON from {url}: {e}"))
 }
 
 /// getAccountInfo with base64 encoding — returns the full result envelope

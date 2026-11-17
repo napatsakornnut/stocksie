@@ -24,7 +24,10 @@
       web3.js serializeMessage) + js-sys interop (connect / signAndSend);
       mock-provider verify: captured bytes == web3.js reconstruction
       (BYTE-IDENTICAL, 209 bytes) — real-Phantom test คือหมุดถัดไปของผู้ใช้
-- [ ] agent UI (ยิง /api/ai เดิมได้เลย)
+- [x] v0.4 agent UI — chat box ยิง /api/ai เดิม; route เพิ่ม origin-gated
+      CORS (AI_ALLOWED_ORIGINS, default ปิด cross-origin เพื่อไม่ให้ยืม key)
+      — verify สอง intent จริง: budget_answer grounded ตรง chain + Thai
+      propose พร้อม item chips
 - [ ] action instructions บน wire-builder เดิม (init/deposit/approve/reimburse)
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
