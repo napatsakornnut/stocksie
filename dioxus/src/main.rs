@@ -151,7 +151,126 @@ impl ChatItem {
     }
 }
 
-/// Parse a user-typed SOL amount to lamports (string math, ≤9 decimals).
+/// Send one chat turn: user bubble → /api/ai → assistant bubble (with item
+/// chips on propose_purchases) → scroll the conversation into view.
+async fn send_chat_msg(
+    mut chat: Signal<Vec<ChatMsg>>,
+    mut chat_input: Signal<String>,
+    mut chat_busy: Signal<bool>,
+    state: Signal<FetchState>,
+    ledger: Signal<LedgerState>,
+) {
+    let text = chat_input().trim().to_string();
+    if text.is_empty() || chat_busy() {
+        return;
+    }
+    chat_input.set(String::new());
+    chat.push(ChatMsg { role: "user", text: text.clone(), items: vec![] });
+    chat_busy.set(true);
+    scroll_chat_box();
+
+    // Grounding context: read household/ledger state BEFORE any await
+    // (signals can't be held across awaits in Dioxus).
+    let (vault, pending, members, recent) = {
+        let st = state.read();
+        let (vault, members) = match &*st {
+            FetchState::Loaded(v) => (v.lamports_sol.clone(), v.member_count),
+            _ => ("unknown".to_string(), 0),
+        };
+        let lg = ledger.read();
+        let rows: Vec<RequestView> = match &*lg {
+            LedgerState::Loaded(rows) => rows.clone(),
+            _ => Vec::new(),
+        };
+        let pending = rows
+            .iter()
+            .filter(|r| r.status == "waiting")
+            .count();
+        let recent: Vec<String> = rows
+            .iter()
+            .take(5)
+            .map(|r| format!("#{} {} for {} SOL", r.request_id, r.status, r.amount_sol))
+            .collect();
+        (vault, pending, members, recent)
+    };
+
+    let body = json!({
+        "mode": "chat",
+        "text": text,
+        "context": {
+            "vaultBalanceSol": vault,
+            "pendingRequestCount": pending,
+            "memberCount": members,
+            "recentRequests": recent,
+        }
+    });
+    match post_json(AI_API_URL, body).await {
+        Ok(v) => {
+            let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+            let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+            if ok && mode == "chat" {
+                let reply = v
+                    .get("reply")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let items = v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|it| {
+                                Some(ChatItem {
+                                    name: it.get("name")?.as_str()?.to_string(),
+                                    quantity: it
+                                        .get("quantity")
+                                        .and_then(|q| q.as_u64())
+                                        .unwrap_or(1) as u32,
+                                    total_minor: it
+                                        .get("totalMinor")
+                                        .and_then(|t| t.as_i64())
+                                        .unwrap_or(0),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                chat.push(ChatMsg { role: "assistant", text: reply, items });
+            } else {
+                let err = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unexpected AI response")
+                    .to_string();
+                chat.push(ChatMsg {
+                    role: "assistant",
+                    text: format!("⚠ {err}"),
+                    items: vec![],
+                });
+            }
+        }
+        Err(e) => chat.push(ChatMsg {
+            role: "assistant",
+            text: format!("⚠ {e}"),
+            items: vec![],
+        }),
+    }
+    chat_busy.set(false);
+    scroll_chat_box();
+}
+
+/// Scroll the conversation box to the latest message.
+fn scroll_chat_box() {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("chat-box"))
+    {
+        use wasm_bindgen::JsCast;
+        if let Ok(html) = el.dyn_into::<web_sys::HtmlElement>() {
+            html.set_scroll_top(html.scroll_height());
+        }
+    }
+}
 fn parse_sol_to_lamports(input: &str) -> Option<u64> {
     let t = input.trim();
     if t.is_empty() {
@@ -326,6 +445,68 @@ const THEME_CSS: &str = r#"
     input, select, textarea { color: var(--text); background: var(--surface); border-color: var(--border-strong); }
     input::placeholder { color: var(--faint); }
     a { color: var(--link); }
+
+    /* manual theme override — html[data-theme] beats the system media query */
+    [data-theme="dark"] {
+        --bg: #0c0a09; --surface: #1c1917; --surface-2: #292524; --surface-3: #1c1917;
+        --border: #44403c; --border-strong: #57534e;
+        --text: #f5f5f4; --muted: #a8a29e; --faint: #78716c; --ink-soft: #d6d3d1; --chip-ink-muted: #d6d3d1;
+        --accent: #10b981; --teal: #0d9488; --violet: #a78bfa;
+        --danger: #f87171; --danger-bg: #2c0a0a; --danger-border: #7f1d1d; --danger-ink: #fca5a5;
+        --success: #34d399; --success-bg: #052e16; --success-border: #14532d;
+        --link: #93c5fd;
+        --warn-bg: #451a03; --warn-ink: #fbbf24;
+        --info-bg: #172554; --info-ink: #93c5fd;
+        --violet-bg: #2e1065; --violet-ink: #c4b5fd;
+    }
+    [data-theme="light"] {
+        --bg: #fafaf9; --surface: #ffffff; --surface-2: #f5f5f4; --surface-3: #fafaf9;
+        --border: #e7e5e4; --border-strong: #d6d3d1;
+        --text: #1c1917; --muted: #78716c; --faint: #a8a29e; --ink-soft: #44403c; --chip-ink-muted: #57534e;
+        --accent: #059669; --teal: #0f766e; --violet: #8250df;
+        --danger: #b91c1c; --danger-bg: #fef2f2; --danger-border: #fecaca; --danger-ink: #991b1b;
+        --success: #166534; --success-bg: #f0fdf4; --success-border: #bbf7d0;
+        --link: #1d4ed8;
+        --warn-bg: #fef3c7; --warn-ink: #92400e;
+        --info-bg: #dbeafe; --info-ink: #1e40af;
+        --violet-bg: #ede9fe; --violet-ink: #5b21b6;
+    }
+
+    /* sticky section nav */
+    .topnav {
+        position: sticky; top: 0; z-index: 20;
+        display: flex; gap: 4px; flex-wrap: wrap;
+        padding: 8px 0; margin-bottom: 4px;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
+    }
+    .topnav a {
+        font-size: 12px; color: var(--muted); text-decoration: none;
+        padding: 4px 10px; border-radius: 6px;
+    }
+    .topnav a:hover { color: var(--text); background: var(--surface-2); }
+    [id] { scroll-margin-top: 72px; }
+
+    /* result banners */
+    .banner { padding: 10px 12px; border-radius: 8px; font-size: 12px; margin: 0; }
+    .banner-ok {
+        border: 1px solid var(--success-border); background: var(--success-bg); color: var(--success);
+    }
+    .banner-err {
+        border: 1px solid var(--danger-border); background: var(--danger-bg); color: var(--danger);
+    }
+
+    /* copy buttons */
+    .copybtn {
+        font-size: 10px; padding: 2px 8px;
+        border: 1px solid var(--border-strong); border-radius: 6px;
+        background: var(--surface-2); color: var(--muted); cursor: pointer;
+    }
+    .copybtn:hover { color: var(--text); }
+
+    #chat-box { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+        padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--surface-3); }
 "#;
 
 /// Execute + report into the actions message line (shared by all handlers).
@@ -386,7 +567,38 @@ fn app() -> Element {
     let mut receipt_state = use_signal(|| "idle".to_string());
     let mut receipt_currency = use_signal(|| "THB".to_string());
     let mut sol_thb = use_signal(|| DEFAULT_SOL_THB);
-    let mut receipt_input_key = use_signal(|| 0u32);
+    // theme: "system" | "light" | "dark" (persisted in localStorage)
+    let mut theme_mode = use_signal(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("stocksie-theme").ok().flatten())
+            .unwrap_or_else(|| "system".to_string())
+    });
+    // apply + persist the theme whenever it changes
+    use_effect(move || {
+        let mode = theme_mode();
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(html) = doc.document_element() {
+                let _ = match mode.as_str() {
+                    "dark" => html.set_attribute("data-theme", "dark"),
+                    "light" => html.set_attribute("data-theme", "light"),
+                    _ => html.remove_attribute("data-theme"),
+                };
+            }
+        }
+        if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = store.set_item("stocksie-theme", &mode);
+        }
+    });
+
+    let toggle_theme = move |_| {
+        let next = match theme_mode().as_str() {
+            "system" => "light",
+            "light" => "dark",
+            _ => "system",
+        };
+        theme_mode.set(next.to_string());
+    };
 
     let connect_wallet = move |_| {
         spawn(async move {
@@ -932,103 +1144,7 @@ fn app() -> Element {
     };
 
     let send_chat = move |_| {
-        spawn(async move {
-            let text = chat_input().trim().to_string();
-            if text.is_empty() || chat_busy() {
-                return;
-            }
-            chat_input.set(String::new());
-            chat.push(ChatMsg { role: "user", text: text.clone(), items: vec![] });
-            chat_busy.set(true);
-
-            // Grounding context: read household/ledger state BEFORE any await
-            // (signals can't be held across awaits in Dioxus).
-            let (vault, pending, members, recent) = {
-                let st = state.read();
-                let (vault, members) = match &*st {
-                    FetchState::Loaded(v) => (v.lamports_sol.clone(), v.member_count),
-                    _ => ("unknown".to_string(), 0),
-                };
-                let lg = ledger.read();
-                let rows: Vec<RequestView> = match &*lg {
-                    LedgerState::Loaded(rows) => rows.clone(),
-                    _ => Vec::new(),
-                };
-                let pending = rows
-                    .iter()
-                    .filter(|r| r.status == "waiting")
-                    .count();
-                let recent: Vec<String> = rows
-                    .iter()
-                    .take(5)
-                    .map(|r| format!("#{} {} for {} SOL", r.request_id, r.status, r.amount_sol))
-                    .collect();
-                (vault, pending, members, recent)
-            };
-
-            let body = json!({
-                "mode": "chat",
-                "text": text,
-                "context": {
-                    "vaultBalanceSol": vault,
-                    "pendingRequestCount": pending,
-                    "memberCount": members,
-                    "recentRequests": recent,
-                }
-            });
-            match post_json(AI_API_URL, body).await {
-                Ok(v) => {
-                    let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
-                    let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
-                    if ok && mode == "chat" {
-                        let reply = v
-                            .get("reply")
-                            .and_then(|r| r.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let items = v
-                            .get("items")
-                            .and_then(|i| i.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|it| {
-                                        Some(ChatItem {
-                                            name: it.get("name")?.as_str()?.to_string(),
-                                            quantity: it
-                                                .get("quantity")
-                                                .and_then(|q| q.as_u64())
-                                                .unwrap_or(1) as u32,
-                                            total_minor: it
-                                                .get("totalMinor")
-                                                .and_then(|t| t.as_i64())
-                                                .unwrap_or(0),
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        chat.push(ChatMsg { role: "assistant", text: reply, items });
-                    } else {
-                        let err = v
-                            .get("error")
-                            .and_then(|e| e.as_str())
-                            .unwrap_or("unexpected AI response")
-                            .to_string();
-                        chat.push(ChatMsg {
-                            role: "assistant",
-                            text: format!("⚠ {err}"),
-                            items: vec![],
-                        });
-                    }
-                }
-                Err(e) => chat.push(ChatMsg {
-                    role: "assistant",
-                    text: format!("⚠ {e}"),
-                    items: vec![],
-                }),
-            }
-            chat_busy.set(false);
-        });
+        spawn(send_chat_msg(chat, chat_input, chat_busy, state, ledger));
     };
 
     let fetch = move |owner_raw: String| {
@@ -1142,7 +1258,7 @@ fn app() -> Element {
                 return;
             };
             let owner = Pubkey::from_str(&pk).expect("connected key");
-            let (household, counter) = match fetch_household_state(&owner).await {
+            let (_, counter) = match fetch_household_state(&owner).await {
                 Ok(r) => r,
                 Err(e) => {
                     action_msg.set(format!("⚠ {e}"));
@@ -1207,6 +1323,25 @@ fn app() -> Element {
     rsx! {
         style { {THEME_CSS} }
         main { style: "max-width:640px;margin:48px auto;padding:0 20px;font-family:ui-sans-serif,system-ui;color:var(--text)",
+            nav { class: "topnav",
+                a { href: "#ledger", "📒 Ledger" }
+                a { href: "#wallet", "👛 Wallet" }
+                a { href: "#agent", "🤖 Agent" }
+                a { href: "#actions", "🛠 Actions" }
+                a { href: "#receipt", "🧾 Receipt" }
+                div { style: "flex:1" }
+                button {
+                    class: "copybtn",
+                    style: "padding:4px 10px;font-size:12px",
+                    onclick: toggle_theme,
+                    title: "Toggle theme (system / light / dark)",
+                    match theme_mode().as_str() {
+                        "light" => "☀️ light",
+                        "dark" => "🌙 dark",
+                        _ => "🌗 system",
+                    }
+                }
+            }
             header {
                 h1 { "🤖🏠 Stocksie — RIIR prototype" }
                 p { style: "color:var(--muted);font-size:14px",
@@ -1232,7 +1367,7 @@ fn app() -> Element {
             div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px",
                 for (addr, label) in DEMO_OWNERS {
                     button {
-                        style: "padding:6px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface-3);font-size:12px;cursor:pointer",
+                        style: "padding:6px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px;cursor:pointer",
                         onclick: move |_| {
                             owner_input.set(addr.to_string());
                             fetch(addr.to_string());
@@ -1253,7 +1388,7 @@ fn app() -> Element {
                 FetchState::Loaded(v) => rsx! { HouseholdCard { view: *v.clone() } },
             }
 
-            h2 { style: "margin:28px 0 8px;font-size:16px", "🛒 Purchase ledger" }
+            h2 { id: "ledger", style: "margin:28px 0 8px;font-size:16px", "🛒 Purchase ledger" }
             match &*ledger.read() {
                 LedgerState::Idle => rsx! { p { style: "color:var(--faint);font-size:13px", "Load a household to see its requests." } },
                 LedgerState::Loading => rsx! { p { style: "color:var(--faint);font-size:13px", "Reading the ledger from devnet…" } },
@@ -1268,7 +1403,7 @@ fn app() -> Element {
                 LedgerState::Loaded(rows) => rsx! { LedgerTable { rows: rows.clone() } },
             }
 
-            h2 { style: "margin:28px 0 8px;font-size:16px", "👛 Wallet — first signed tx from Rust" }
+            h2 { id: "wallet", style: "margin:28px 0 8px;font-size:16px", "👛 Wallet — first signed tx from Rust" }
             div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
                 p { style: "font-size:12px;color:var(--muted);margin:0",
                     "Detects window.phantom (Wallet Standard), builds the memo tx wire bytes in Rust, and hands them to the wallet — the wallet fills the signature slot and submits."
@@ -1329,10 +1464,10 @@ fn app() -> Element {
                 }
             }
 
-            h2 { style: "margin:28px 0 8px;font-size:16px", "🤖 AI agent — same /api/ai as the Next.js app" }
+            h2 { id: "agent", style: "margin:28px 0 8px;font-size:16px", "🤖 AI agent — same /api/ai as the Next.js app" }
             div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
                 div {
-                    style: "max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-3)",
+                    id: "chat-box",
                     if chat.len() == 0 {
                         p { style: "font-size:12px;color:var(--faint);margin:0",
                             "Try “ซื้อนม 2 ขวด งบ 50 บาท” or “งบเหลือเท่าไหร่” — proposals list items; answers use the live household numbers loaded above."
@@ -1368,7 +1503,12 @@ fn app() -> Element {
                         style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
                         value: "{chat_input}",
                         oninput: move |e| chat_input.set(e.value()),
-                        placeholder: "Ask the agent… (Thai/English)",
+                        onkeydown: move |e| {
+                            if e.key() == Key::Enter && !e.modifiers().contains(Modifiers::SHIFT) {
+                                spawn(send_chat_msg(chat, chat_input, chat_busy, state, ledger));
+                            }
+                        },
+                        placeholder: "Ask the agent… (Thai/English) — Enter to send",
                         disabled: chat_busy(),
                     }
                     button {
@@ -1380,7 +1520,7 @@ fn app() -> Element {
                 }
             }
 
-            h2 { style: "margin:28px 0 8px;font-size:16px", "🛠 Actions — household ops as Rust wire bytes" }
+            h2 { id: "actions", style: "margin:28px 0 8px;font-size:16px", "🛠 Actions — household ops as Rust wire bytes" }
             div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:12px",
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
                     div { style: "flex:1;min-width:200px",
@@ -1671,14 +1811,17 @@ fn app() -> Element {
                     }
                 }
                 if !action_msg().is_empty() {
-                    p { style: "font-size:12px;margin:0;color:if action_msg().starts_with('✓') { \"var(--success)\" } else { \"var(--danger)\" }", "{action_msg}" }
+                    div {
+                        class: if action_msg().starts_with("✓") { "banner banner-ok" } else { "banner banner-err" },
+                        "{action_msg}"
+                    }
                 }
                 p { style: "font-size:11px;color:var(--faint);margin:0",
                     "Note: create with buyer = you, then approve — the program forbids self-approval, so use a second wallet for the buyer in a real household."
                 }
             }
 
-            h2 { style: "margin:28px 0 8px;font-size:16px", "🧾 Receipt → requests" }
+            h2 { id: "receipt", style: "margin:28px 0 8px;font-size:16px", "🧾 Receipt → requests" }
             div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
                 div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center",
                     input {
@@ -1738,25 +1881,45 @@ fn HouseholdCard(view: HouseholdView) -> Element {
     rsx! {
         div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:20px;display:grid;gap:10px",
             h2 { style: "margin:0;font-size:18px", "Household " span { style: "color:var(--accent)", "✓ live on devnet" } }
-            Row { label: "Household PDA".to_string(), value: view.pda.clone() }
-            Row { label: "Vault balance".to_string(), value: format!("{} SOL (account lamports)", view.lamports_sol) }
-            Row { label: "Mirror field vault_balance".to_string(), value: format!("{} lamports", view.vault_balance_mirror) }
-            Row { label: "Owner".to_string(), value: view.owner.clone() }
-            Row { label: "Members".to_string(), value: view.member_count.to_string() }
-            Row { label: "Purchase requests opened".to_string(), value: view.request_counter.to_string() }
-            Row { label: "Rewards distributed".to_string(), value: format!("{} pts", view.total_rewards) }
-            Row { label: "Created at slot".to_string(), value: view.created_slot.to_string() }
-            Row { label: "Name fingerprint (blake3, hex)".to_string(), value: view.name_hash_hex.clone() }
+            Row { label: "Household PDA".to_string(), value: view.pda.clone(), copy: Some(view.pda_key.to_string()) }
+            Row { label: "Vault balance".to_string(), value: format!("{} SOL (account lamports)", view.lamports_sol), copy: None }
+            Row { label: "Mirror field vault_balance".to_string(), value: format!("{} lamports", view.vault_balance_mirror), copy: None }
+            Row { label: "Owner".to_string(), value: view.owner.clone(), copy: Some(view.owner.clone()) }
+            Row { label: "Members".to_string(), value: view.member_count.to_string(), copy: None }
+            Row { label: "Purchase requests opened".to_string(), value: view.request_counter.to_string(), copy: None }
+            Row { label: "Rewards distributed".to_string(), value: format!("{} pts", view.total_rewards), copy: None }
+            Row { label: "Created at slot".to_string(), value: view.created_slot.to_string(), copy: None }
+            Row { label: "Name fingerprint (blake3, hex)".to_string(), value: view.name_hash_hex.clone(), copy: None }
         }
     }
 }
 
 #[component]
-fn Row(label: String, value: String) -> Element {
+fn Row(label: String, value: String, copy: Option<String>) -> Element {
+    let mut copied = use_signal(|| false);
     rsx! {
         div { style: "display:flex;justify-content:space-between;gap:12px;font-size:13px",
             span { style: "color:var(--muted)", "{label}" }
-            span { style: "font-family:ui-monospace,monospace;word-break:break-all;text-align:right", "{value}" }
+            div { style: "display:flex;gap:6px;align-items:center;min-width:0",
+                span { style: "font-family:ui-monospace,monospace;word-break:break-all;text-align:right", "{value}" }
+                if let Some(text) = copy {
+                    button {
+                        class: "copybtn",
+                        title: "Copy to clipboard",
+                        onclick: move |_| {
+                            if let Some(w) = web_sys::window() {
+                                let _ = w.navigator().clipboard().write_text(&text);
+                            }
+                            copied.set(true);
+                            spawn(async move {
+                                gloo_timers::future::TimeoutFuture::new(1200).await;
+                                copied.set(false);
+                            });
+                        },
+                        if copied() { "✓" } else { "copy" }
+                    }
+                }
+            }
         }
     }
 }

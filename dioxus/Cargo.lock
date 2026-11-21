@@ -2930,6 +2930,7 @@ dependencies = [
  "dioxus",
  "ed25519-dalek",
  "gloo-net 0.8.0",
+ "gloo-timers",
  "js-sys",
  "serde",
  "serde_json",
