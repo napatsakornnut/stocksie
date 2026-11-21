@@ -98,6 +98,7 @@ struct RequestView {
     pubkey: String,
     request_id: u64,
     amount_sol: String,
+    amount_lamports: u64,
     status: &'static str,
     buyer: String,
     buyer_key: Pubkey,
@@ -111,6 +112,13 @@ enum LedgerState {
     Loading,
     Loaded(Vec<RequestView>),
     Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ViewMode {
+    Home,
+    Lists,
+    Assistant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -504,6 +512,16 @@ const THEME_CSS: &str = r#"
     }
     .copybtn:hover { color: var(--text); }
 
+    .tabbar {
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+        display: flex; background: var(--surface); border-top: 1px solid var(--border);
+    }
+    .tabbar button {
+        flex: 1; padding: 10px 0 8px; border: none; background: none;
+        color: var(--muted); font-size: 11px; cursor: pointer; white-space: pre-line;
+    }
+    .tabbar button.active { color: var(--accent); font-weight: 700; }
+    body { padding-bottom: 64px; }
     #chat-box { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
         padding: 10px; border: 1px solid var(--border); border-radius: 8px;
         background: var(--surface-3); }
@@ -525,6 +543,267 @@ async fn execute_and_report(
             action_msg.set(format!("⚠ {label}: {e}"));
             false
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// โหมดบ้าน (Slice 1) — member list, on-device contact book, friendly labels
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+struct MemberView {
+    wallet: Pubkey,
+    role_tag: u8, // 0 Owner, 1 Parent, 2 Child, 3 Guest
+    reward_points: u64,
+}
+
+fn member_discriminator() -> [u8; 8] {
+    Sha256::digest(b"account:Member")[..8].try_into().expect("8 bytes")
+}
+
+/// All ACTIVE members of one household (getProgramAccounts filtered by the
+/// Member discriminator + household @8).
+async fn fetch_members(household: &Pubkey) -> Result<Vec<MemberView>, String> {
+    let res = rpc_call(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            PROGRAM_ID,
+            {
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "filters": [
+                    {"memcmp": {"offset": 0, "bytes": bs58::encode(member_discriminator()).into_string()}},
+                    {"memcmp": {"offset": 8, "bytes": household.to_string()}}
+                ]
+            }
+        ]
+    }))
+    .await?;
+    let accounts = res
+        .as_array()
+        .ok_or("unexpected getProgramAccounts response shape")?;
+    let mut members = Vec::new();
+    for entry in accounts {
+        let Some(account) = entry.get("account") else { continue };
+        let Some(encoded) = account
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|d| d.first())
+            .and_then(|s| s.as_str())
+        else {
+            continue;
+        };
+        let bytes = B64.decode(encoded).map_err(|e| format!("base64: {e}"))?;
+        if bytes.len() < 91 || bytes[81] == 0 {
+            continue; // short account or soft-removed member
+        }
+        members.push(MemberView {
+            wallet: Pubkey::try_from(&bytes[40..72]).unwrap_or_default(),
+            role_tag: bytes[72],
+            reward_points: u64::from_le_bytes(bytes[73..81].try_into().unwrap()),
+        });
+    }
+    Ok(members)
+}
+
+fn role_name(tag: u8) -> &'static str {
+    match tag {
+        0 => "เจ้าบ้าน",
+        1 => "ผู้ปกครอง",
+        2 => "ลูก",
+        _ => "แขก",
+    }
+}
+
+fn role_emoji(tag: u8) -> &'static str {
+    match tag {
+        0 => "👑",
+        1 => "🧑",
+        2 => "🧒",
+        _ => "👤",
+    }
+}
+
+/// หนึ่งรายการในสมุดรายชื่อครอบครัว — จำชื่อเล่นของแต่ละ wallet ไว้ในเครื่อง
+/// (ไม่ลง chain — ความเป็นส่วนตัวเหมือนเดิม)
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Contact {
+    pk: String,
+    name: String,
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+}
+
+fn load_contacts(hh: &str) -> Vec<Contact> {
+    storage()
+        .and_then(|s| s.get_item(&format!("contacts:{hh}")).ok().flatten())
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+fn save_contacts(hh: &str, contacts: &[Contact]) {
+    if let Some(s) = storage() {
+        let _ = s.set_item(&format!("contacts:{hh}"), &serde_json::to_string(contacts).unwrap_or_default());
+    }
+}
+
+/// ข้อความของแต่ละคำขอ (จำในเครื่อง — บน chain เก็บ blake3 เท่านั้น)
+fn load_item_texts(hh: &str) -> Vec<(u64, String)> {
+    storage()
+        .and_then(|s| s.get_item(&format!("items:{hh}")).ok().flatten())
+        .and_then(|v| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&v).ok())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.parse::<u64>().ok()?, v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_item_text(hh: &str, id: u64, text: &str) {
+    if let Some(s) = storage() {
+        let mut items: serde_json::Map<String, serde_json::Value> = s
+            .get_item(&format!("items:{hh}"))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        items.insert(id.to_string(), serde_json::json!(text));
+        let _ = s.set_item(&format!("items:{hh}"), &serde_json::to_string(&items).unwrap_or_default());
+    }
+}
+
+/// Bundle of page signals shared by every action (all Copy — cheap to pass).
+#[derive(Clone, Copy)]
+struct Ctx {
+    action_msg: Signal<String>,
+    action_busy: Signal<bool>,
+    state: Signal<FetchState>,
+    ledger: Signal<LedgerState>,
+    contacts: Signal<Vec<Contact>>,
+    members: Signal<Vec<MemberView>>,
+    item_texts: Signal<Vec<(u64, String)>>,
+}
+
+impl Ctx {
+    /// Reload household + members + ledger + on-device caches for one owner.
+    async fn refresh(&self, owner_raw: String) {
+        let mut state = self.state;
+        let mut ledger = self.ledger;
+        let mut contacts = self.contacts;
+        let mut members = self.members;
+        let mut item_texts = self.item_texts;
+        let owner_raw = owner_raw.trim().to_string();
+        state.set(FetchState::Loading);
+        ledger.set(LedgerState::Idle);
+        match load_household(&owner_raw).await {
+            Ok(v) => {
+                let key = v.pda_key;
+                state.set(FetchState::Loaded(Box::new(v)));
+                // members + on-device caches (contacts, item texts)
+                members.set(fetch_members(&key).await.unwrap_or_default());
+                contacts.set(load_contacts(&key.to_string()));
+                item_texts.set(load_item_texts(&key.to_string()));
+                ledger.set(LedgerState::Loading);
+                ledger.set(match load_ledger(&key).await {
+                    Ok(rows) => LedgerState::Loaded(rows),
+                    Err(e) => LedgerState::Failed(e),
+                });
+            }
+            Err(e) => {
+                state.set(FetchState::Failed(e));
+                ledger.set(LedgerState::Idle);
+            }
+        }
+    }
+
+    /// อนุมัติ (Owner/Parent) — ปุ่มบนบัตรคำขอในโหมดบ้าน
+    async fn do_approve(&self, admin: &Pubkey, caller: &Pubkey, request_id: u64) -> bool {
+        let action_msg = self.action_msg;
+        let ixs = vec![programs::approve_purchase_request(
+            admin, caller, request_id, &programs::program_id(),
+        )];
+        let ok = execute_and_report(action_msg, caller, "อนุมัติแล้ว", ixs).await;
+        if ok {
+            self.refresh(admin.to_string()).await;
+        }
+        ok
+    }
+
+    /// ไม่อนุมัติ — reason เก็บเป็น blake3 เหมือนเดิม
+    async fn do_reject(&self, admin: &Pubkey, caller: &Pubkey, request_id: u64, reason: &str) -> bool {
+        let action_msg = self.action_msg;
+        let ixs = vec![programs::reject_purchase_request(
+            admin,
+            caller,
+            request_id,
+            programs::text_hash(reason),
+            &programs::program_id(),
+        )];
+        let ok = execute_and_report(action_msg, caller, "ไม่อนุมัติแล้ว", ixs).await;
+        if ok {
+            self.refresh(admin.to_string()).await;
+        }
+        ok
+    }
+
+    /// จ่ายเงินคืนผู้ซื้อ (Owner/Parent)
+    async fn do_reimburse(&self, admin: &Pubkey, caller: &Pubkey, buyer: &Pubkey, request_id: u64, lamports: u64) -> bool {
+        let action_msg = self.action_msg;
+        let ixs = vec![programs::reimburse_buyer(
+            admin,
+            caller,
+            buyer,
+            request_id,
+            lamports,
+            &programs::program_id(),
+        )];
+        let ok = execute_and_report(action_msg, caller, "จ่ายเงินคืนแล้ว", ixs).await;
+        if ok {
+            self.refresh(admin.to_string()).await;
+        }
+        ok
+    }
+
+    /// ผู้ซื้อยืนยันว่าซื้อแล้ว (unit cost เก็บ hash เหมือนเดิม)
+    async fn do_confirm(&self, owner: &Pubkey, buyer: &Pubkey, request_id: u64) -> bool {
+        let ixs = vec![programs::confirm_restock(
+            owner,
+            buyer,
+            request_id,
+            programs::text_hash("ซื้อแล้ว"),
+            &programs::program_id(),
+        )];
+        let ok = execute_and_report(self.action_msg, buyer, "บันทึกว่าซื้อแล้ว", ixs).await;
+        if ok {
+            self.refresh(owner.to_string()).await;
+        }
+        ok
+    }
+
+    /// เปิดคำขอใหม่ + จำข้อความ item ไว้ในเครื่อง (บน chain เก็บ blake3 เท่านั้น)
+    async fn do_create(&self, caller: &Pubkey, buyer: &Pubkey, counter: u64, lamports: u64, item_text: &str, unit_cost: &str) -> bool {
+        let action_msg = self.action_msg;
+        let ixs = vec![programs::create_purchase_request(
+            caller,
+            buyer,
+            counter,
+            lamports,
+            programs::text_hash(item_text),
+            programs::text_hash(unit_cost),
+            &programs::program_id(),
+        )];
+        let ok = execute_and_report(action_msg, caller, &format!("เปิดคำขอ #{counter}"), ixs).await;
+        if ok {
+            let hh = programs::household_pda(caller, &programs::program_id()).0;
+            save_item_text(&hh.to_string(), counter, item_text);
+            self.refresh(caller.to_string()).await;
+        }
+        ok
     }
 }
 
@@ -567,6 +846,21 @@ fn app() -> Element {
     let mut receipt_state = use_signal(|| "idle".to_string());
     let mut receipt_currency = use_signal(|| "THB".to_string());
     let mut sol_thb = use_signal(|| DEFAULT_SOL_THB);
+    // โหมดบ้าน (v1.0): tab + shared context for every action
+    let mut view_mode = use_signal(|| ViewMode::Home);
+    let mut advanced_mode = use_signal(|| false);
+    let mut contacts = use_signal(Vec::new);
+    let mut members = use_signal(Vec::new);
+    let mut item_texts = use_signal(Vec::new);
+    let ctx = Ctx {
+        action_msg,
+        action_busy,
+        state,
+        ledger,
+        contacts,
+        members,
+        item_texts,
+    };
     // theme: "system" | "light" | "dark" (persisted in localStorage)
     let mut theme_mode = use_signal(|| {
         web_sys::window()
@@ -607,7 +901,10 @@ fn app() -> Element {
             match wallet::detect_provider() {
                 Err(e) => wallet_error.set(Some(e)),
                 Ok(provider) => match wallet::connect(&provider).await {
-                    Ok(pk) => wallet_pubkey.set(Some(pk)),
+                    Ok(pk) => {
+                        wallet_pubkey.set(Some(pk.clone()));
+                        ctx.refresh(pk).await;
+                    }
                     Err(e) => wallet_error.set(Some(e)),
                 },
             }
@@ -693,7 +990,7 @@ fn app() -> Element {
             {
                 Ok(sig) => {
                     action_msg.set(format!("✓ household created — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -719,7 +1016,7 @@ fn app() -> Element {
             match execute(&owner, vec![programs::deposit_funds(&owner, lamports, &programs::program_id())]).await {
                 Ok(sig) => {
                     action_msg.set(format!("✓ deposited — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -773,7 +1070,7 @@ fn app() -> Element {
             {
                 Ok(sig) => {
                     action_msg.set(format!("✓ request opened — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -796,10 +1093,10 @@ fn app() -> Element {
                 return;
             };
             let owner = Pubkey::from_str(&pk).expect("connected key");
-            match execute(&owner, vec![programs::approve_purchase_request(&owner, request_id, &programs::program_id())]).await {
+            match execute(&owner, vec![programs::approve_purchase_request(&owner, &owner, request_id, &programs::program_id())]).await {
                 Ok(sig) => {
                     action_msg.set(format!("✓ approved — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -830,7 +1127,7 @@ fn app() -> Element {
             match execute(&owner, vec![programs::add_member(&owner, &new_member, role_tag, &programs::program_id())]).await {
                 Ok(sig) => {
                     action_msg.set(format!("✓ member added — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -869,7 +1166,7 @@ fn app() -> Element {
             {
                 Ok(sig) => {
                     action_msg.set(format!("✓ restocked — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, owner_input()).await;
+                    ctx.refresh(owner_input()).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -920,7 +1217,7 @@ fn app() -> Element {
             {
                 Ok(sig) => {
                     action_msg.set(format!("✓ reimbursed — {}", &sig[..16.min(sig.len())]));
-                    refresh_into(state, ledger, owner_input()).await;
+                    ctx.refresh(owner_input()).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -965,7 +1262,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, owner_input()).await;
+                ctx.refresh(owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -995,7 +1292,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, owner_input()).await;
+                ctx.refresh(owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -1024,7 +1321,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, pk).await;
+                ctx.refresh(pk).await;
             }
             action_busy.set(false);
         });
@@ -1072,7 +1369,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, owner_input()).await;
+                ctx.refresh(owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -1102,7 +1399,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, owner_input()).await;
+                ctx.refresh(owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -1137,7 +1434,7 @@ fn app() -> Element {
             )
             .await;
             if ok {
-                refresh_into(state, ledger, owner_input()).await;
+                ctx.refresh(owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -1149,7 +1446,7 @@ fn app() -> Element {
 
     let fetch = move |owner_raw: String| {
         spawn(async move {
-            refresh_into(state, ledger, owner_raw).await;
+            ctx.refresh(owner_raw).await;
         });
     };
 
@@ -1311,7 +1608,7 @@ fn app() -> Element {
                         counter + 1,
                         &sig[..16.min(sig.len())]
                     ));
-                    refresh_into(state, ledger, pk).await;
+                    ctx.refresh(pk).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
             }
@@ -1324,11 +1621,19 @@ fn app() -> Element {
         style { {THEME_CSS} }
         main { style: "max-width:640px;margin:48px auto;padding:0 20px;font-family:ui-sans-serif,system-ui;color:var(--text)",
             nav { class: "topnav",
-                a { href: "#ledger", "📒 Ledger" }
-                a { href: "#wallet", "👛 Wallet" }
-                a { href: "#agent", "🤖 Agent" }
-                a { href: "#actions", "🛠 Actions" }
-                a { href: "#receipt", "🧾 Receipt" }
+                button {
+                    class: "copybtn",
+                    style: "padding:4px 10px;font-size:12px",
+                    onclick: move |_| advanced_mode.set(!advanced_mode()),
+                    {if *advanced_mode.read() { "🏠 โหมดบ้าน" } else { "⚙️ โหมดขั้นสูง" }}
+                }
+                if *advanced_mode.read() {
+                    a { href: "#ledger", "📒 Ledger" }
+                    a { href: "#wallet", "👛 Wallet" }
+                    a { href: "#agent", "🤖 Agent" }
+                    a { href: "#actions", "🛠 Actions" }
+                    a { href: "#receipt", "🧾 Receipt" }
+                }
                 div { style: "flex:1" }
                 button {
                     class: "copybtn",
@@ -1342,6 +1647,7 @@ fn app() -> Element {
                     }
                 }
             }
+            if *advanced_mode.read() {
             header {
                 h1 { "🤖🏠 Stocksie — RIIR prototype" }
                 p { style: "color:var(--muted);font-size:14px",
@@ -1868,6 +2174,247 @@ fn app() -> Element {
                 }
             }
 
+            } else {
+                header { style: "display:flex;justify-content:space-between;align-items:center",
+                    h1 { style: "font-size:20px;margin:0", "🏠 บ้านของเรา" }
+                }
+                {match (wallet_pubkey().clone(), &*state.read()) {
+                    (None, _) => rsx! {
+                        div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
+                            p { style: "margin:0;font-size:14px", "ยินดีต้อนรับ 👋" }
+                            p { style: "margin:0;font-size:12px;color:var(--muted)", "1️⃣ เชื่อมกระเป๋าเงินเพื่อเริ่มใช้งาน" }
+                            button {
+                                style: "padding:10px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
+                                onclick: connect_wallet,
+                                disabled: *wallet_busy.read(),
+                                if *wallet_busy.read() { "Connecting…" } else { "เข้าใช้งานด้วยกระเป๋าเงิน" }
+                            }
+                        }
+                    },
+                    (Some(_), FetchState::Loading) => rsx! { p { style: "color:var(--faint);font-size:14px", "กำลังโหลด…" } },
+                    (Some(_), FetchState::Failed(msg)) => rsx! {
+                        div { class: "banner banner-err", "⚠ {msg}" }
+                        p { style: "color:var(--muted);font-size:13px", "ใส่ address เจ้าบ้านในโหมดขั้นสูง ⚙️ แล้วกด Load household" }
+                    },
+                    (Some(_), FetchState::Idle) => rsx! {
+                        div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
+                            p { style: "margin:0;font-size:14px", "2️⃣ ตั้งชื่อบ้าน — จบในคลิกเดียว" }
+                            div { style: "display:flex;gap:8px",
+                                input {
+                                    style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
+                                    value: "{name_input}", oninput: move |e| name_input.set(e.value()),
+                                    placeholder: "เช่น บ้านสวนยา" }
+                                button {
+                                    style: "padding:10px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                                    onclick: init_household, disabled: action_busy() || name_input().trim().is_empty(),
+                                    "สร้างบ้าน" }
+                            }
+                        }
+                    },
+                    (Some(_), FetchState::Loaded(v)) => {
+                        let thb_balance = v.lamports_sol.parse::<f64>().unwrap_or(0.0) * sol_thb();
+                        let owner_pk = Pubkey::from_str(&v.owner).ok();
+                        let wallet_pk = wallet_pubkey().and_then(|p| Pubkey::from_str(&p).ok());
+                        let my_role = wallet_pk.and_then(|w| members().iter().find(|m| m.wallet == w).map(|m| m.role_tag));
+                        let can_approve = matches!(my_role, Some(0) | Some(1));
+                        let texts = item_texts();
+                        let pending_rows: Vec<_> = match &*ledger.read() {
+                            LedgerState::Loaded(rows) => rows.iter().filter(|r| r.status == "waiting").cloned().collect(),
+                            _ => Vec::new(),
+                        };
+                        let other_rows: Vec<_> = match &*ledger.read() {
+                            LedgerState::Loaded(rows) => rows.iter().filter(|r| r.status != "waiting").cloned().collect(),
+                            _ => Vec::new(),
+                        };
+                        match view_mode() {
+                            ViewMode::Home => rsx! {
+                                div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;background:var(--surface);display:grid;gap:4px",
+                                    span { style: "font-size:12px;color:var(--muted)", "💰 งบครัวเรือน" }
+                                    span { style: "font-size:34px;font-weight:700", "฿{thb_balance:.2}" }
+                                    span { style: "font-size:12px;color:var(--faint)", "≈ {v.lamports_sol} SOL · สมาชิก {v.member_count} คน" }
+                                }
+                                div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px",
+                                    for m in members() {
+                                        div { style: "display:flex;gap:6px;align-items:center;padding:6px 10px;border-radius:9999px;border:1px solid var(--border);background:var(--surface)",
+                                            span { "{role_emoji(m.role_tag)}" }
+                                            span { style: "font-size:12px", "{contact_name(&m.wallet, &contacts(), &members())}" }
+                                            if m.reward_points > 0 {
+                                                span { style: "font-size:11px;color:var(--faint)", "{m.reward_points} pts" }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let LedgerState::Failed(e) = &*ledger.read() {
+                                    div { class: "banner banner-err", "⚠ โหลดรายการไม่สำเร็จ ({e}) — ลองปิดหน้าแล้วเปิดใหม่" }
+                                }
+                                h2 { style: "margin:24px 0 8px;font-size:16px", "📋 รออนุมัติ ({pending_rows.len()})" }
+                                if pending_rows.is_empty() {
+                                    p { style: "color:var(--faint);font-size:13px", "ไม่มีคำขอรออนุมัติ — สบายใจได้ :)" }
+                                }
+                                for row in pending_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:8px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:14px;font-weight:700", "฿{row_amount_thb(&row.amount_sol, sol_thb()):.2}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "ขอโดย {contact_name(&row.buyer_key, &contacts(), &members())}" }
+                                        if can_approve {
+                                            div { style: "display:flex;gap:8px",
+                                                button {
+                                                    style: "flex:1;padding:10px;border:none;border-radius:8px;background:var(--accent);color:white;font-weight:700;cursor:pointer",
+                                                    onclick: move |_| {
+                                                        let ctx = ctx;
+                                                        let admin = owner_pk;
+                                                        let caller = wallet_pk;
+                                                        spawn(async move {
+                                                            if let (Some(a), Some(c)) = (admin, caller) { ctx.do_approve(&a, &c, row.request_id).await; }
+                                                        });
+                                                    },
+                                                    "✓ อนุมัติ"
+                                                }
+                                                button {
+                                                    style: "flex:1;padding:10px;border:none;border-radius:8px;background:var(--danger-bg);color:var(--danger);font-weight:700;cursor:pointer",
+                                                    onclick: move |_| {
+                                                        let admin = owner_pk;
+                                                        let caller = wallet_pk;
+                                                        spawn(async move {
+                                                            if let (Some(a), Some(c)) = (admin, caller) { ctx.do_reject(&a, &c, row.request_id, "ไม่อนุมัติจากหน้าหลัก").await; }
+                                                        });
+                                                    },
+                                                    "✗ ไม่อนุมัติ"
+                                                }
+                                            }
+                                        } else {
+                                            span { style: "font-size:12px;color:var(--faint)", "รอผู้ใหญ่อนุมัติ" }
+                                        }
+                                    }
+                                }
+                                h2 { style: "margin:24px 0 8px;font-size:16px", "✅ กำลังดำเนินการ / เสร็จแล้ว" }
+                                for row in other_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:8px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:12px;padding:2px 8px;border-radius:9999px {status_style(row.status)}", "{status_thai(row.status)}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "ผู้ซื้อ: {contact_name(&row.buyer_key, &contacts(), &members())} · ฿{row_amount_thb(&row.amount_sol, sol_thb()):.2}" }
+                                        if row.status == "approved" && wallet_pk == Some(row.buyer_key) {
+                                            button {
+                                                style: "padding:8px 12px;border:none;border-radius:8px;background:var(--accent);color:white;font-weight:600;cursor:pointer",
+                                                onclick: move |_| {
+                                                    let ctx = ctx;
+                                                    let owner = owner_pk;
+                                                    let buyer = wallet_pk;
+                                                    spawn(async move {
+                                                        if let (Some(o), Some(b)) = (owner, buyer) { ctx.do_confirm(&o, &b, row.request_id).await; }
+                                                    });
+                                                },
+                                                "ฉันซื้อแล้ว ✓"
+                                            }
+                                        }
+                                        if row.status == "restocked" && my_role == Some(0) {
+                                            button {
+                                                style: "padding:8px 12px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                                                onclick: move |_| {
+                                                    let ctx = ctx;
+                                                    let owner = owner_pk;
+                                                    let caller = wallet_pk;
+                                                    let buyer = row.buyer_key;
+                                                    let amt = row.amount_lamports;
+                                                    spawn(async move {
+                                                        if let (Some(o), Some(c)) = (owner, caller) { ctx.do_reimburse(&o, &c, &buyer, row.request_id, amt).await; }
+                                                    });
+                                                },
+                                                "จ่ายเงินคืน"
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            ViewMode::Lists => rsx! {
+                                for row in other_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px;margin-bottom:10px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:12px;padding:2px 8px;border-radius:9999px {status_style(row.status)}", "{status_thai(row.status)}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "฿{row_amount_thb(&row.amount_sol, sol_thb()):.2} · ผู้ซื้อ {contact_name(&row.buyer_key, &contacts(), &members())}" }
+                                    }
+                                }
+                                for row in pending_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px;margin-bottom:10px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:12px;padding:2px 8px;border-radius:9999px {status_style(row.status)}", "{status_thai(row.status)}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "฿{row_amount_thb(&row.amount_sol, sol_thb()):.2} · ผู้ซื้อ {contact_name(&row.buyer_key, &contacts(), &members())}" }
+                                    }
+                                }
+                            },
+                            ViewMode::Assistant => rsx! {
+                                div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
+                                    div {
+                                        id: "chat-box",
+                                        if chat.len() == 0 {
+                                            p { style: "font-size:12px;color:var(--faint);margin:0",
+                                                "พิมพ์อะไรก็ได้ เช่น “ซื้อนม 2 ขวด งบ 50 บาท” — ผมช่วยเปิดคำขอให้เลย" }
+                                        }
+                                        for msg in chat() {
+                                            div {
+                                                class: if msg.role == "user" { "align-self:flex-end" } else { "align-self:flex-start" },
+                                                style: if msg.role == "user" {
+                                                    "max-width:85%;padding:8px 12px;border-radius:12px 12px 2px 12px;background:var(--accent);color:white;font-size:13px"
+                                                } else {
+                                                    "max-width:90%;padding:8px 12px;border-radius:12px 12px 12px 2px;background:var(--surface-2);color:var(--text);font-size:13px"
+                                                },
+                                                "{msg.text}"
+                                                if !msg.items.is_empty() {
+                                                    div { style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:8px",
+                                                        for item in msg.items {
+                                                            span {
+                                                                style: "padding:2px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-soft);font-size:11px;border:1px solid var(--border-strong)",
+                                                                "{item.label()}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if chat_busy() {
+                                            div { style: "align-self:flex-start;font-size:12px;color:var(--faint)", "กำลังคิด…" }
+                                        }
+                                    }
+                                    div { style: "display:flex;gap:8px",
+                                        input {
+                                            style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
+                                            value: "{chat_input}",
+                                            oninput: move |e| chat_input.set(e.value()),
+                                            onkeydown: move |e| {
+                                                if e.key() == Key::Enter {
+                                                    spawn(send_chat_msg(chat, chat_input, chat_busy, state, ledger));
+                                                }
+                                            },
+                                            placeholder: "พิมพ์ตรงนี้…",
+                                            disabled: chat_busy(),
+                                        }
+                                        button {
+                                            style: "padding:10px 16px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
+                                            onclick: send_chat,
+                                            disabled: chat_busy() || chat_input().trim().is_empty(),
+                                            "ส่ง"
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }}
+                div { class: "tabbar",
+                    button { class: if *view_mode.read() == ViewMode::Home { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Home), "🏠\nหน้าแรก" }
+                    button { class: if *view_mode.read() == ViewMode::Lists { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Lists), "📋\nรายการ" }
+                    button { class: if *view_mode.read() == ViewMode::Assistant { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Assistant), "🤖\nผู้ช่วย" }
+                    button { onclick: move |_| advanced_mode.set(true), "⚙️\nขั้นสูง" }
+                }
+            }
             footer { style: "margin-top:40px;color:var(--faint);font-size:11px;border-top:1px solid var(--border);padding-top:12px",
                 "Privacy note: the household name never lands on-chain — the contract stores a blake3 fingerprint only, decoded here as hex. "
                 "Program: " {PROGRAM_ID}
@@ -1922,6 +2469,40 @@ fn Row(label: String, value: String, copy: Option<String>) -> Element {
             }
         }
     }
+}
+
+fn status_thai(status: &str) -> &'static str {
+    match status {
+        "waiting" => "รออนุมัติ",
+        "approved" => "อนุมัติแล้ว",
+        "restocked" => "ซื้อแล้ว",
+        "reimbursed" => "จ่ายคืนแล้ว",
+        "rejected" => "ไม่อนุมัติ",
+        _ => "?",
+    }
+}
+
+fn contact_name(pk: &Pubkey, contacts: &[Contact], members: &[MemberView]) -> String {
+    let addr = pk.to_string();
+    if let Some(c) = contacts.iter().find(|c| c.pk == addr) {
+        return c.name.clone();
+    }
+    if let Some(m) = members.iter().find(|m| m.wallet == *pk) {
+        return format!("{} {}", role_emoji(m.role_tag), role_name(m.role_tag));
+    }
+    format!("{}…{}", &addr[..6], &addr[addr.len() - 4..])
+}
+
+fn item_text_of(texts: &[(u64, String)], id: u64) -> String {
+    texts
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, t)| t.clone())
+        .unwrap_or_else(|| format!("คำขอ #{id}"))
+}
+
+fn row_amount_thb(amount_sol: &str, rate: f64) -> f64 {
+    amount_sol.parse::<f64>().unwrap_or(0.0) * rate
 }
 
 fn status_style(status: &str) -> &'static str {
@@ -2100,6 +2681,7 @@ async fn load_ledger(household: &Pubkey) -> Result<Vec<RequestView>, String> {
                 .to_string(),
             request_id: u64_at(72),
             amount_sol: format!("{:.6}", u64_at(80) as f64 / 1e9),
+            amount_lamports: u64_at(80),
             status: status_name(bytes[152]),
             buyer: Pubkey::try_from(&bytes[40..72])
                 .map(|p| {
@@ -2370,7 +2952,7 @@ mod e2e {
         let wire = tx::build_wire_tx(
             &owner,
             &blockhash,
-            &[programs::approve_purchase_request(&owner, 1, &program)],
+            &[programs::approve_purchase_request(&owner, &owner, 1, &program)],
         );
         send_and_confirm(&wallet, &wire);
         let (hh, _) = programs::household_pda(&owner, &program);

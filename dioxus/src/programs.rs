@@ -379,13 +379,15 @@ pub fn set_role(
 }
 
 /// approve_purchase_request(household(ro), caller_member(ro), request(w),
-/// caller(ro,s))
+/// caller(ro,s)) — Owner/Parent approves. `admin` seeds the household (the
+/// approver may be a Parent, not the household creator).
 pub fn approve_purchase_request(
+    admin: &Pubkey,
     caller: &Pubkey,
     request_id: u64,
     program: &Pubkey,
 ) -> ProgramIx {
-    let household = household_pda(caller, program).0;
+    let household = household_pda(admin, program).0;
     let caller_member = member_pda(&household, caller, program);
     let request = purchase_pda(&household, request_id, program);
     ix(
