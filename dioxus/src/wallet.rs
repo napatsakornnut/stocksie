@@ -84,8 +84,12 @@ pub async fn sign_and_send(provider: &JsValue, wire: &[u8]) -> Result<String, St
             .to_string()
     })?;
     let opts = Object::new();
-    Reflect::set(&opts, &JsValue::from_str("transaction"), &Uint8Array::from(wire).into())
-        .map_err(|e| format!("option set failed: {}", js_err_text(&e)))?;
+    Reflect::set(
+        &opts,
+        &JsValue::from_str("transaction"),
+        &Uint8Array::from(wire).into(),
+    )
+    .map_err(|e| format!("option set failed: {}", js_err_text(&e)))?;
     let promise = f
         .call1(provider, &opts.into())
         .map_err(|e| format!("signAndSendTransaction() rejected: {}", js_err_text(&e)))?;

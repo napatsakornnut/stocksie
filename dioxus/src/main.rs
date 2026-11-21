@@ -849,6 +849,9 @@ fn app() -> Element {
     // โหมดบ้าน (v1.0): tab + shared context for every action
     let mut view_mode = use_signal(|| ViewMode::Home);
     let mut advanced_mode = use_signal(|| false);
+    // เชิญสมาชิกผ่านลิงก์ (?join=<owner_address>)
+    let mut copied_invite = use_signal(|| false);
+    let mut joined_from = use_signal(|| None::<String>);
     let mut contacts = use_signal(Vec::new);
     let mut members = use_signal(Vec::new);
     let mut item_texts = use_signal(Vec::new);
@@ -1472,6 +1475,29 @@ fn app() -> Element {
                 }
             }
         });
+    });
+
+    // เชิญสมาชิก: อ่าน ?join=<owner_address> จากลิงก์ → โหลดบ้านของเจ้าบ้านทันที
+    use_effect(move || {
+        let join = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .and_then(|search| {
+                search
+                    .split('&')
+                    .find_map(|p| {
+                        p.strip_prefix("?join=")
+                            .or_else(|| p.strip_prefix("&join="))
+                            .map(|s| s.trim().to_string())
+                    })
+                    .filter(|s| !s.is_empty())
+            });
+        if let Some(addr) = join {
+            owner_input.set(addr.clone());
+            joined_from.set(Some(addr.clone()));
+            spawn(async move {
+                ctx.refresh(addr).await;
+            });
+        }
     });
 
     // 🧾 receipt: read the picked file (web-sys), POST to /api/ai, list items
@@ -2178,7 +2204,7 @@ fn app() -> Element {
                 header { style: "display:flex;justify-content:space-between;align-items:center",
                     h1 { style: "font-size:20px;margin:0", "🏠 บ้านของเรา" }
                 }
-                {match (wallet_pubkey().clone(), &*state.read()) {
+                {match (wallet_pubkey().clone(), state().clone()) {
                     (None, _) => rsx! {
                         div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
                             p { style: "margin:0;font-size:14px", "ยินดีต้อนรับ 👋" }
@@ -2228,10 +2254,18 @@ fn app() -> Element {
                         };
                         match view_mode() {
                             ViewMode::Home => rsx! {
+                                if joined_from().is_some() {
+                                    div { class: "banner banner-ok", "คุณถูกเชิญเข้าบ้าน ✓ ส่ง address ของคุณให้เจ้าบ้านกด Add member หลังเชื่อมกระเป๋าเงิน" }
+                                }
                                 div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;background:var(--surface);display:grid;gap:4px",
                                     span { style: "font-size:12px;color:var(--muted)", "💰 งบครัวเรือน" }
                                     span { style: "font-size:34px;font-weight:700", "฿{thb_balance:.2}" }
                                     span { style: "font-size:12px;color:var(--faint)", "≈ {v.lamports_sol} SOL · สมาชิก {v.member_count} คน" }
+                                    button {
+                                        style: "padding:8px 12px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer;width:fit-content",
+                                        onclick: move |_| view_mode.set(ViewMode::Assistant),
+                                        "🤖 ให้ผู้ช่วยช่วยซื้อของ →"
+                                    }
                                 }
                                 div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px",
                                     for m in members() {
@@ -2246,6 +2280,30 @@ fn app() -> Element {
                                 }
                                 if let LedgerState::Failed(e) = &*ledger.read() {
                                     div { class: "banner banner-err", "⚠ โหลดรายการไม่สำเร็จ ({e}) — ลองปิดหน้าแล้วเปิดใหม่" }
+                                }
+                                div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:14px;display:grid;gap:8px",
+                                    span { style: "font-size:13px;font-weight:600", "🔗 เชิญสมาชิกเข้าบ้าน" }
+                                    button {
+                                        class: "copybtn",
+                                        style: "padding:6px 10px;width:fit-content",
+                                        onclick: move |_| {
+                                            let owner_addr = v.owner.clone();
+                                            if let Some(w) = web_sys::window() {
+                                                let origin = w.location().origin().unwrap_or_default();
+                                                let invite = format!("{origin}/?join={owner_addr}");
+                                                let _ = w.navigator().clipboard().write_text(&invite);
+                                                copied_invite.set(true);
+                                                spawn(async move {
+                                                    gloo_timers::future::TimeoutFuture::new(1600).await;
+                                                    copied_invite.set(false);
+                                                });
+                                            }
+                                        },
+                                        if *copied_invite.read() { "✓ คัดลอกลิงก์เชิญแล้ว" } else { "คัดลอกลิงก์เชิญสมาชิก" }
+                                    }
+                                    p { style: "font-size:11px;color:var(--muted);margin:0",
+                                        "สมาชิกใหม่เปิดลิงก์ กดเข้าใช้งาน แล้วส่ง address ของเขากลับมา — คุณกด Add member ในโหมดขั้นสูง"
+                                    }
                                 }
                                 h2 { style: "margin:24px 0 8px;font-size:16px", "📋 รออนุมัติ ({pending_rows.len()})" }
                                 if pending_rows.is_empty() {

@@ -80,35 +80,49 @@ pub fn build_wire_tx(payer: &Pubkey, blockhash: &[u8; 32], ixs: &[ProgramIx]) ->
         writable: bool,
     }
     let mut keys: Vec<Pubkey> = vec![*payer];
-    let mut metas: Vec<Meta> = vec![Meta { signer: true, writable: true }];
+    let mut metas: Vec<Meta> = vec![Meta {
+        signer: true,
+        writable: true,
+    }];
 
-    let mut push_key = |keys: &mut Vec<Pubkey>, metas: &mut Vec<Meta>, pk: Pubkey, m: Meta| -> usize {
-        if let Some(i) = keys.iter().position(|k| *k == pk) {
-            let existing = metas[i];
-            metas[i] = Meta {
-                signer: existing.signer || m.signer,
-                writable: existing.writable || m.writable,
-            };
-            i
-        } else {
-            keys.push(pk);
-            metas.push(m);
-            keys.len() - 1
-        }
-    };
+    let mut push_key =
+        |keys: &mut Vec<Pubkey>, metas: &mut Vec<Meta>, pk: Pubkey, m: Meta| -> usize {
+            if let Some(i) = keys.iter().position(|k| *k == pk) {
+                let existing = metas[i];
+                metas[i] = Meta {
+                    signer: existing.signer || m.signer,
+                    writable: existing.writable || m.writable,
+                };
+                i
+            } else {
+                keys.push(pk);
+                metas.push(m);
+                keys.len() - 1
+            }
+        };
 
     let mut compiled: Vec<(usize, usize, Vec<u8>, usize)> = Vec::new(); // (program_idx, acct_idx_start, data, data_len)
     let mut compiled_accounts: Vec<Vec<usize>> = Vec::new();
     for ix in ixs {
-        let program_idx =
-            push_key(&mut keys, &mut metas, ix.program, Meta { signer: false, writable: false });
+        let program_idx = push_key(
+            &mut keys,
+            &mut metas,
+            ix.program,
+            Meta {
+                signer: false,
+                writable: false,
+            },
+        );
         let mut idxs = Vec::with_capacity(ix.accounts.len());
         for (pk, writable, signer) in &ix.accounts {
             let i = push_key(
                 &mut keys,
                 &mut metas,
                 *pk,
-                Meta { signer: *signer, writable: *writable },
+                Meta {
+                    signer: *signer,
+                    writable: *writable,
+                },
             );
             idxs.push(i);
         }
@@ -143,8 +157,14 @@ pub fn build_wire_tx(payer: &Pubkey, blockhash: &[u8; 32], ixs: &[ProgramIx]) ->
 
     let mut msg = Vec::new();
     let required_sigs = sorted_metas.iter().filter(|m| m.signer).count();
-    let readonly_signed = sorted_metas.iter().filter(|m| m.signer && !m.writable).count();
-    let readonly_unsigned = sorted_metas.iter().filter(|m| !m.signer && !m.writable).count();
+    let readonly_signed = sorted_metas
+        .iter()
+        .filter(|m| m.signer && !m.writable)
+        .count();
+    let readonly_unsigned = sorted_metas
+        .iter()
+        .filter(|m| !m.signer && !m.writable)
+        .count();
     msg.push(required_sigs as u8);
     msg.push(readonly_signed as u8);
     msg.push(readonly_unsigned as u8);

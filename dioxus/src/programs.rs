@@ -43,11 +43,20 @@ pub fn text_hash(text: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn ix(program: &Pubkey, disc: [u8; 8], accounts: Vec<(Pubkey, bool, bool)>, args: &[u8]) -> ProgramIx {
+fn ix(
+    program: &Pubkey,
+    disc: [u8; 8],
+    accounts: Vec<(Pubkey, bool, bool)>,
+    args: &[u8],
+) -> ProgramIx {
     let mut data = Vec::with_capacity(8 + args.len());
     data.extend_from_slice(&disc);
     data.extend_from_slice(args);
-    ProgramIx { program: *program, accounts, data }
+    ProgramIx {
+        program: *program,
+        accounts,
+        data,
+    }
 }
 
 // discriminators copied from app/idl/stocksie.json
@@ -67,11 +76,7 @@ const DISC_SET_ROLE: [u8; 8] = [77, 78, 62, 233, 192, 61, 199, 190];
 
 /// initialize_household(household(w), owner_member(w), owner(w,s), system)
 /// args: name_hash [u8;32]
-pub fn initialize_household(
-    owner: &Pubkey,
-    name_hash: [u8; 32],
-    program: &Pubkey,
-) -> ProgramIx {
+pub fn initialize_household(owner: &Pubkey, name_hash: [u8; 32], program: &Pubkey) -> ProgramIx {
     let household = household_pda(owner, program).0;
     let owner_member = member_pda(&household, owner, program);
     ix(
