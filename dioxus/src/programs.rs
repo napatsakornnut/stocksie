@@ -58,6 +58,12 @@ const DISC_APPROVE_PURCHASE_REQUEST: [u8; 8] = [120, 116, 66, 219, 241, 134, 110
 const DISC_ADD_MEMBER: [u8; 8] = [13, 116, 123, 130, 126, 198, 57, 34];
 const DISC_CONFIRM_RESTOCK: [u8; 8] = [168, 30, 4, 173, 92, 59, 24, 106];
 const DISC_REIMBURSE_BUYER: [u8; 8] = [194, 20, 70, 81, 246, 45, 24, 35];
+const DISC_REJECT_PURCHASE_REQUEST: [u8; 8] = [159, 23, 80, 0, 1, 144, 72, 23];
+const DISC_CLOSE_PURCHASE_REQUEST: [u8; 8] = [0, 203, 46, 255, 73, 162, 24, 115];
+const DISC_WITHDRAW_FUNDS: [u8; 8] = [241, 36, 29, 111, 208, 31, 104, 217];
+const DISC_AWARD_REWARD: [u8; 8] = [223, 205, 213, 32, 234, 132, 85, 29];
+const DISC_REMOVE_MEMBER: [u8; 8] = [171, 57, 231, 150, 167, 128, 18, 55];
+const DISC_SET_ROLE: [u8; 8] = [77, 78, 62, 233, 192, 61, 199, 190];
 
 /// initialize_household(household(w), owner_member(w), owner(w,s), system)
 /// args: name_hash [u8;32]
@@ -217,6 +223,158 @@ pub fn reimburse_buyer(
             (*caller, false, true),
         ],
         &lamports.to_le_bytes(),
+    )
+}
+
+/// reject_purchase_request(household(ro), caller_member(ro), request(w),
+/// caller(s)) args: reason_hash [u8;32] — Owner/Parent only.
+pub fn reject_purchase_request(
+    owner: &Pubkey,
+    caller: &Pubkey,
+    request_id: u64,
+    reason_hash: [u8; 32],
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(owner, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let request = purchase_pda(&household, request_id, program);
+    ix(
+        program,
+        DISC_REJECT_PURCHASE_REQUEST,
+        vec![
+            (household, false, false),
+            (caller_member, false, false),
+            (request, true, false),
+            (*caller, false, true),
+        ],
+        &reason_hash,
+    )
+}
+
+/// close_purchase_request(household(ro), caller_member(ro), request(w),
+/// caller(w,s)) — reclaims the request's rent to the caller. Terminal states
+/// only (reimbursed / rejected).
+pub fn close_purchase_request(
+    owner: &Pubkey,
+    caller: &Pubkey,
+    request_id: u64,
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(owner, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let request = purchase_pda(&household, request_id, program);
+    ix(
+        program,
+        DISC_CLOSE_PURCHASE_REQUEST,
+        vec![
+            (household, false, false),
+            (caller_member, false, false),
+            (request, true, false),
+            (*caller, true, true),
+        ],
+        &[],
+    )
+}
+
+/// withdraw_funds(household(w), owner_member(ro), owner(w,s), system)
+/// args: lamports u64 — the admin drains the vault (money always goes to the
+/// admin's own account).
+pub fn withdraw_funds(owner: &Pubkey, lamports: u64, program: &Pubkey) -> ProgramIx {
+    let household = household_pda(owner, program).0;
+    let owner_member = member_pda(&household, owner, program);
+    ix(
+        program,
+        DISC_WITHDRAW_FUNDS,
+        vec![
+            (household, true, false),
+            (owner_member, false, false),
+            (*owner, true, true),
+            (crate::tx::system_program(), false, false),
+        ],
+        &lamports.to_le_bytes(),
+    )
+}
+
+/// award_reward(household(w), caller_member(ro), target_member(w), caller(s))
+/// args: member_wallet pubkey, points u64, reason_hash [u8;32] — Owner/Parent
+/// only. `admin` seeds the household; `target` receives the points.
+pub fn award_reward(
+    admin: &Pubkey,
+    caller: &Pubkey,
+    target: &Pubkey,
+    points: u64,
+    reason_hash: [u8; 32],
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(admin, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let target_member = member_pda(&household, target, program);
+    let mut args = Vec::with_capacity(32 + 8 + 32);
+    args.extend_from_slice(target.as_ref());
+    args.extend_from_slice(&points.to_le_bytes());
+    args.extend_from_slice(&reason_hash);
+    ix(
+        program,
+        DISC_AWARD_REWARD,
+        vec![
+            (household, true, false),
+            (caller_member, false, false),
+            (target_member, true, false),
+            (*caller, false, true),
+        ],
+        &args,
+    )
+}
+
+/// remove_member(household(w), caller_member(ro), target_member(w),
+/// caller(w,s)) args: member_wallet pubkey — Owner only.
+pub fn remove_member(
+    admin: &Pubkey,
+    caller: &Pubkey,
+    target: &Pubkey,
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(admin, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let target_member = member_pda(&household, target, program);
+    ix(
+        program,
+        DISC_REMOVE_MEMBER,
+        vec![
+            (household, true, false),
+            (caller_member, false, false),
+            (target_member, true, false),
+            (*caller, true, true),
+        ],
+        target.as_ref(),
+    )
+}
+
+/// set_role(household(ro), caller_member(ro), target_member(w), caller(s))
+/// args: new_role u8 (borsh unit-enum tag), member_wallet pubkey — Owner only.
+pub fn set_role(
+    admin: &Pubkey,
+    caller: &Pubkey,
+    target: &Pubkey,
+    role_tag: u8,
+    program: &Pubkey,
+) -> ProgramIx {
+    let household = household_pda(admin, program).0;
+    let caller_member = member_pda(&household, caller, program);
+    let target_member = member_pda(&household, target, program);
+    let mut args = Vec::with_capacity(1 + 32);
+    args.push(role_tag);
+    args.extend_from_slice(target.as_ref());
+    ix(
+        program,
+        DISC_SET_ROLE,
+        vec![
+            (household, false, false),
+            (caller_member, false, false),
+            (target_member, true, false),
+            (*caller, false, true),
+        ],
+        &args,
     )
 }
 

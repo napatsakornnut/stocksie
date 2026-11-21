@@ -328,6 +328,25 @@ const THEME_CSS: &str = r#"
     a { color: var(--link); }
 "#;
 
+/// Execute + report into the actions message line (shared by all handlers).
+async fn execute_and_report(
+    mut action_msg: Signal<String>,
+    payer: &Pubkey,
+    label: &str,
+    ixs: Vec<tx::ProgramIx>,
+) -> bool {
+    match execute(payer, ixs).await {
+        Ok(sig) => {
+            action_msg.set(format!("✓ {label} — {}", &sig[..16.min(sig.len())]));
+            true
+        }
+        Err(e) => {
+            action_msg.set(format!("⚠ {label}: {e}"));
+            false
+        }
+    }
+}
+
 fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
@@ -349,6 +368,16 @@ fn app() -> Element {
     let mut restock_cost_input = use_signal(String::new);
     let mut reimb_id_input = use_signal(String::new);
     let mut reimb_amount_input = use_signal(String::new);
+    let mut reject_id_input = use_signal(String::new);
+    let mut reject_reason_input = use_signal(String::new);
+    let mut close_id_input = use_signal(String::new);
+    let mut withdraw_input = use_signal(String::new);
+    let mut award_member_input = use_signal(String::new);
+    let mut award_points_input = use_signal(String::new);
+    let mut award_reason_input = use_signal(String::new);
+    let mut remove_member_input = use_signal(String::new);
+    let mut role_member_input = use_signal(String::new);
+    let mut role_select = use_signal(|| "1".to_string());
     let mut chat = use_signal(Vec::new);
     let mut chat_input = use_signal(String::new);
     let mut chat_busy = use_signal(|| false);
@@ -682,6 +711,221 @@ fn app() -> Element {
                     refresh_into(state, ledger, owner_input()).await;
                 }
                 Err(e) => action_msg.set(format!("⚠ {e}")),
+            }
+            action_busy.set(false);
+        });
+    };
+
+    // --- admin/owner actions (v0.9) — household derives from the admin field ---
+    let reject_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(request_id) = reject_id_input().trim().parse::<u64>() else {
+                action_msg.set("⚠ Enter the request number.".into());
+                action_busy.set(false);
+                return;
+            };
+            let reason = reject_reason_input().trim().to_string();
+            if reason.is_empty() {
+                action_msg.set("⚠ Enter a rejection reason (kept private).".into());
+                action_busy.set(false);
+                return;
+            }
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let admin = Pubkey::from_str(&owner_input()).expect("admin address");
+            let ok = execute_and_report(
+                action_msg,
+                &caller,
+                "declined",
+                vec![programs::reject_purchase_request(
+                    &admin,
+                    &caller,
+                    request_id,
+                    programs::text_hash(&reason),
+                    &programs::program_id(),
+                )],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, owner_input()).await;
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let close_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(request_id) = close_id_input().trim().parse::<u64>() else {
+                action_msg.set("⚠ Enter the request number.".into());
+                action_busy.set(false);
+                return;
+            };
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let admin = Pubkey::from_str(&owner_input()).expect("admin address");
+            let ok = execute_and_report(
+                action_msg,
+                &caller,
+                "closed (rent reclaimed)",
+                vec![programs::close_purchase_request(&admin, &caller, request_id, &programs::program_id())],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, owner_input()).await;
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let withdraw_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Some(lamports) = parse_sol_to_lamports(&withdraw_input()) else {
+                action_msg.set("⚠ Enter a valid SOL amount.".into());
+                action_busy.set(false);
+                return;
+            };
+            let owner = Pubkey::from_str(&pk).expect("connected key");
+            let ok = execute_and_report(
+                action_msg,
+                &owner,
+                "withdrawn to your account",
+                vec![programs::withdraw_funds(&owner, lamports, &programs::program_id())],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, pk).await;
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let award_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(target) = Pubkey::from_str(award_member_input().trim()) else {
+                action_msg.set("⚠ Invalid member address.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(points) = award_points_input().trim().parse::<u64>() else {
+                action_msg.set("⚠ Points must be a whole number.".into());
+                action_busy.set(false);
+                return;
+            };
+            let reason = award_reason_input().trim().to_string();
+            if reason.is_empty() {
+                action_msg.set("⚠ Enter a reason (kept private).".into());
+                action_busy.set(false);
+                return;
+            }
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let admin = Pubkey::from_str(&owner_input()).expect("admin address");
+            let ok = execute_and_report(
+                action_msg,
+                &caller,
+                "reward granted",
+                vec![programs::award_reward(
+                    &admin,
+                    &caller,
+                    &target,
+                    points,
+                    programs::text_hash(&reason),
+                    &programs::program_id(),
+                )],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, owner_input()).await;
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let remove_member_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(target) = Pubkey::from_str(remove_member_input().trim()) else {
+                action_msg.set("⚠ Invalid member address.".into());
+                action_busy.set(false);
+                return;
+            };
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let admin = Pubkey::from_str(&owner_input()).expect("admin address");
+            let ok = execute_and_report(
+                action_msg,
+                &caller,
+                "member removed",
+                vec![programs::remove_member(&admin, &caller, &target, &programs::program_id())],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, owner_input()).await;
+            }
+            action_busy.set(false);
+        });
+    };
+
+    let set_role_action = move |_| {
+        spawn(async move {
+            action_busy.set(true);
+            action_msg.set(String::new());
+            let Some(pk) = wallet_pubkey().clone() else {
+                action_msg.set("⚠ Connect a wallet first.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(target) = Pubkey::from_str(role_member_input().trim()) else {
+                action_msg.set("⚠ Invalid member address.".into());
+                action_busy.set(false);
+                return;
+            };
+            let Ok(role_tag) = role_select().parse::<u8>() else {
+                action_msg.set("⚠ Pick a role.".into());
+                action_busy.set(false);
+                return;
+            };
+            let caller = Pubkey::from_str(&pk).expect("connected key");
+            let admin = Pubkey::from_str(&owner_input()).expect("admin address");
+            let ok = execute_and_report(
+                action_msg,
+                &caller,
+                "role updated",
+                vec![programs::set_role(&admin, &caller, &target, role_tag, &programs::program_id())],
+            )
+            .await;
+            if ok {
+                refresh_into(state, ledger, owner_input()).await;
             }
             action_busy.set(false);
         });
@@ -1295,6 +1539,137 @@ fn app() -> Element {
                         "Reimburse buyer"
                     }
                 }
+                div { style: "font-size:11px;color:var(--faint);margin-top:4px", "TREASURY (admin)" }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "width:140px",
+                        label { style: "font-size:11px;color:var(--muted)", "Withdraw (SOL)" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{withdraw_input}",
+                            oninput: move |e| withdraw_input.set(e.value()),
+                            placeholder: "0.01",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                        onclick: withdraw_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Withdraw"
+                    }
+                }
+                div { style: "font-size:11px;color:var(--faint);margin-top:8px", "REWARDS (admin/parent)" }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "flex:2;min-width:180px",
+                        label { style: "font-size:11px;color:var(--muted)", "Member address" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{award_member_input}",
+                            oninput: move |e| award_member_input.set(e.value()),
+                            placeholder: "Their wallet address",
+                        }
+                    }
+                    div { style: "width:110px",
+                        label { style: "font-size:11px;color:var(--muted)", "Points" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{award_points_input}",
+                            oninput: move |e| award_points_input.set(e.value()),
+                            placeholder: "25",
+                        }
+                    }
+                    div { style: "flex:1;min-width:160px",
+                        label { style: "font-size:11px;color:var(--muted)", "Reason" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
+                            value: "{award_reason_input}",
+                            oninput: move |e| award_reason_input.set(e.value()),
+                            placeholder: "Great job!",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                        onclick: award_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Give points"
+                    }
+                }
+                div { style: "font-size:11px;color:var(--faint);margin-top:8px", "MEMBERS & ROLES (admin)" }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "flex:2;min-width:180px",
+                        label { style: "font-size:11px;color:var(--muted)", "Member address" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{role_member_input}",
+                            oninput: move |e| role_member_input.set(e.value()),
+                            placeholder: "Their wallet address",
+                        }
+                    }
+                    div { style: "width:120px",
+                        label { style: "font-size:11px;color:var(--muted)", "New role" }
+                        select {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
+                            value: "{role_select}",
+                            onchange: move |e| role_select.set(e.value()),
+                            option { value: "1", "Parent" }
+                            option { value: "2", "Child" }
+                            option { value: "3", "Guest" }
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                        onclick: set_role_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Update role"
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--danger);color:white;font-weight:600;cursor:pointer",
+                        onclick: remove_member_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Remove member"
+                    }
+                }
+                div { style: "font-size:11px;color:var(--faint);margin-top:8px", "DECLINE / CLOSE / WITHDRAW A REQUEST" }
+                div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end",
+                    div { style: "width:110px",
+                        label { style: "font-size:11px;color:var(--muted)", "Request #" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{reject_id_input}",
+                            oninput: move |e| reject_id_input.set(e.value()),
+                            placeholder: "2",
+                        }
+                    }
+                    div { style: "flex:1;min-width:160px",
+                        label { style: "font-size:11px;color:var(--muted)", "Decline reason" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px",
+                            value: "{reject_reason_input}",
+                            oninput: move |e| reject_reason_input.set(e.value()),
+                            placeholder: "Changed my mind (🔒 private)",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--danger);color:white;font-weight:600;cursor:pointer",
+                        onclick: reject_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Decline"
+                    }
+                    div { style: "width:110px",
+                        label { style: "font-size:11px;color:var(--muted)", "Close #" }
+                        input {
+                            style: "width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:8px;font-size:13px;font-family:ui-monospace,monospace",
+                            value: "{close_id_input}",
+                            oninput: move |e| close_id_input.set(e.value()),
+                            placeholder: "2",
+                        }
+                    }
+                    button {
+                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                        onclick: close_action,
+                        disabled: action_busy() || wallet_pubkey().is_none(),
+                        "Close request"
+                    }
+                }
                 if !action_msg().is_empty() {
                     p { style: "font-size:12px;margin:0;color:if action_msg().starts_with('✓') { \"var(--success)\" } else { \"var(--danger)\" }", "{action_msg}" }
                 }
@@ -1895,6 +2270,109 @@ mod e2e {
             5_000_000,
             "reimbursed_amount mirror"
         );
+
+        // 7. award_reward 25 pts to the buyer (Owner authorizes)
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::award_reward(
+                &owner,
+                &owner,
+                &buyer,
+                25,
+                programs::text_hash("helpful shopper"),
+                &program,
+            )],
+        );
+        send_and_confirm(&wallet, &wire);
+
+        // 8. set_role buyer → Parent (1)
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::set_role(&owner, &owner, &buyer, 1, &program)],
+        );
+        send_and_confirm(&wallet, &wire);
+
+        // 9. create request #2 (buyer is still an active Parent member)
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::create_purchase_request(
+                &owner,
+                &buyer,
+                2,
+                8_000_000,
+                programs::text_hash("ผงซักฟอก 1 ถุง"),
+                programs::text_hash("฿45 estimate"),
+                &program,
+            )],
+        );
+        send_and_confirm(&wallet, &wire);
+
+        // 10. reject #2 (Owner, private reason hash)
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::reject_purchase_request(
+                &owner,
+                &owner,
+                2,
+                programs::text_hash("changed my mind"),
+                &program,
+            )],
+        );
+        send_and_confirm(&wallet, &wire);
+        let req2 = programs::purchase_pda(&hh, 2, &program);
+        let res = rpc(
+            LOCALNET,
+            json!({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[req2.to_string(), {"encoding":"base64","commitment":"confirmed"}]}),
+        );
+        let req2_data = decode(res["result"]["value"]["data"][0].as_str().expect("b64"));
+        assert_eq!(req2_data[152], 4, "status must be Rejected (4)");
+
+        // 11. close #2 — rent flows back to the caller
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::close_purchase_request(&owner, &owner, 2, &program)],
+        );
+        send_and_confirm(&wallet, &wire);
+        let res = rpc(
+            LOCALNET,
+            json!({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[req2.to_string(), {"encoding":"base64","commitment":"confirmed"}]}),
+        );
+        assert!(
+            res.get("result")
+                .and_then(|r| r.get("value"))
+                .map(|v| v.is_null())
+                .unwrap_or(false),
+            "closed request account must be reclaimed"
+        );
+
+        // 12. remove_member buyer (Owner only)
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::remove_member(&owner, &owner, &buyer, &program)],
+        );
+        send_and_confirm(&wallet, &wire);
+
+        // 13. withdraw_funds 0.01 SOL back to the admin
+        let acc = account(&program, &owner).expect("household before withdraw");
+        let lamports_before = acc["lamports"].as_u64().unwrap();
+        let wire = tx::build_wire_tx(
+            &owner,
+            &blockhash,
+            &[programs::withdraw_funds(&owner, 10_000_000, &program)],
+        );
+        send_and_confirm(&wallet, &wire);
+        let acc = account(&program, &owner).expect("household after withdraw");
+        assert!(
+            acc["lamports"].as_u64().unwrap() <= lamports_before - 10_000_000,
+            "vault must drop by the withdrawn amount"
+        );
+
         println!("E2E OK — full household lifecycle executed from Rust wire bytes");
     }
 }

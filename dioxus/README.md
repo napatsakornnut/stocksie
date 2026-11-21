@@ -50,6 +50,13 @@ code.
   member first (add_member) and cannot approve their own request.
   Household-PDA derivation always goes through the ADMIN address, never the
   signing member's — a bug class the E2E surfaced twice.
+- **Full program surface (v0.9)**: decline + close + withdraw + award_reward
+  + remove_member + set_role added — every mutating instruction of the
+  program (13/13) is now callable from Rust and the E2E covers all of them
+  (13 transactions on localnet, including reject→close of a second request
+  and rent reclaim asserted as account-gone). The admin-address rule
+  (household derivation) applies to member-scoped ops; withdraw is admin-only
+  and always pays the admin.
 - **Receipt scan (v0.7)**: file input → `/api/ai` mode receipt → items with
   THB amounts → each line converts to SOL at the live CoinGecko rate
   (fallback constant) and opens a REAL `create_purchase_request` via the

@@ -46,6 +46,9 @@
       chain ต่อ tx) — verify ในเบราว์เซอร์ด้วย fixture (app/public/
       receipt-test.html): 4 บรรทัด, bytes ที่จับได้ decode ถูกทุกจุด
       (38,515,908 lamports ≈ ฿94)
+- [x] v0.9 ครบทุก instruction — decline/close/withdraw/award/remove/set_role
+      (13/13 mutating instructions callable จาก Rust) — E2E 13 tx บน localnet
+      ครบ (reject→close ทดสอบ rent reclaim เป็น account-gone ด้วย)
 - [ ] (ถ้าต้องการ) styling parity — inline styles ทำงานแล้ว เหลือจัดฟอร์มสวยเท่านั้น
 
 ## บทเรียนทางเทคนิค (จากการ build ครั้งนี้)
