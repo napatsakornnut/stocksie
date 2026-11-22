@@ -2568,6 +2568,7 @@ fn HouseholdCard(view: HouseholdView) -> Element {
 #[component]
 fn Row(label: String, value: String, copy: Option<String>) -> Element {
     let mut copied = use_signal(|| false);
+    let copy_aria = format!("คัดลอก {label} ไปยังคลิปบอร์ด");
     rsx! {
         div { style: "display:flex;justify-content:space-between;gap:12px;font-size:13px",
             span { style: "color:var(--muted)", "{label}" }
@@ -2577,6 +2578,7 @@ fn Row(label: String, value: String, copy: Option<String>) -> Element {
                     button {
                         class: "copybtn",
                         title: "Copy to clipboard",
+                        aria_label: "{copy_aria}",
                         onclick: move |_| {
                             if let Some(w) = web_sys::window() {
                                 let _ = w.navigator().clipboard().write_text(&text);
