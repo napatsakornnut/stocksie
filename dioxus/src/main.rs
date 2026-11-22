@@ -763,6 +763,22 @@ impl Ctx {
         ok
     }
 
+    /// เพิ่มสมาชิกที่ถูกเชิญ (Owner/Parent กดจากโหมดบ้าน — caller เป็นเจ้าของบ้าน)
+    async fn do_add_member(&self, caller: &Pubkey, new_member: &Pubkey, role_tag: u8) -> bool {
+        let action_msg = self.action_msg;
+        let ixs = vec![programs::add_member(
+            caller,
+            new_member,
+            role_tag,
+            &programs::program_id(),
+        )];
+        let ok = execute_and_report(action_msg, caller, "เพิ่มสมาชิกเข้าบ้านแล้ว ✓", ixs).await;
+        if ok {
+            self.refresh(caller.to_string()).await;
+        }
+        ok
+    }
+
     /// จ่ายเงินคืนผู้ซื้อ (Owner/Parent)
     async fn do_reimburse(&self, admin: &Pubkey, caller: &Pubkey, buyer: &Pubkey, request_id: u64, lamports: u64) -> bool {
         let action_msg = self.action_msg;
@@ -823,6 +839,11 @@ fn app() -> Element {
     let mut owner_input = use_signal(|| DEMO_OWNERS[0].0.to_string());
     let mut state = use_signal(|| FetchState::Idle);
     let mut ledger = use_signal(|| LedgerState::Idle);
+    // จำนวนคำขอรออนุมัติ — ป้ายตัวเลขบนแท็บ 🏠 (คำนวณใหม่ทุก rerender)
+    let pending_n: usize = match &*ledger.read() {
+        LedgerState::Loaded(rows) => rows.iter().filter(|r| r.status == "waiting").count(),
+        _ => 0,
+    };
     let mut wallet_pubkey = use_signal(|| None::<String>);
     let mut wallet_error = use_signal(|| None::<String>);
     let mut wallet_busy = use_signal(|| false);
@@ -864,6 +885,9 @@ fn app() -> Element {
     // เชิญสมาชิกผ่านลิงก์ (?join=<owner_address>)
     let mut copied_invite = use_signal(|| false);
     let mut joined_from = use_signal(|| None::<String>);
+    // โหมดบ้าน: เพิ่มสมาชิกที่ถูกเชิญ + คัดลอก address ตัวเอง
+    let mut invite_addr = use_signal(String::new);
+    let mut copied_addr = use_signal(|| false);
     let mut contacts = use_signal(Vec::new);
     let mut members = use_signal(Vec::new);
     let mut item_texts = use_signal(Vec::new);
@@ -2221,6 +2245,10 @@ fn app() -> Element {
                         div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
                             p { style: "margin:0;font-size:14px", "ยินดีต้อนรับ 👋" }
                             p { style: "margin:0;font-size:12px;color:var(--muted)", "1️⃣ เชื่อมกระเป๋าเงินเพื่อเริ่มใช้งาน" }
+                            if view_mode() != ViewMode::Home {
+                                p { style: "margin:0;font-size:12px;color:var(--muted)",
+                                    "💡 แท็บที่เลือกจะเปิดให้ใช้ทันทีหลังเชื่อมกระเป๋าเงิน" }
+                            }
                             if let Some(err) = &*wallet_error.read() {
                                 p { style: "margin:0;font-size:12px;color:var(--danger)",
                                     "⚠ ยังไม่พบกระเป๋าเงินในเบราว์เซอร์นี้ — ติดตั้ง Phantom จาก phantom.app แล้วลองอีกครั้ง"
@@ -2272,7 +2300,26 @@ fn app() -> Element {
                         match view_mode() {
                             ViewMode::Home => rsx! {
                                 if joined_from().is_some() {
-                                    div { class: "banner banner-ok", "คุณถูกเชิญเข้าบ้าน ✓ ส่ง address ของคุณให้เจ้าบ้านกด Add member หลังเชื่อมกระเป๋าเงิน" }
+                                    div { class: "banner banner-ok", style: "display:grid;gap:8px",
+                                        span { "คุณถูกเชิญเข้าบ้าน ✓ กดคัดลอก address ของคุณ แล้วส่งกลับให้เจ้าบ้านเพิ่มคุณเข้าบ้าน" }
+                                        button {
+                                            class: "copybtn",
+                                            style: "padding:6px 10px;width:fit-content",
+                                            onclick: move |_| {
+                                                if let Some(w) = web_sys::window() {
+                                                    if let Some(pk) = wallet_pubkey() {
+                                                        let _ = w.navigator().clipboard().write_text(&pk);
+                                                        copied_addr.set(true);
+                                                        spawn(async move {
+                                                            gloo_timers::future::TimeoutFuture::new(1600).await;
+                                                            copied_addr.set(false);
+                                                        });
+                                                    }
+                                                }
+                                            },
+                                            if *copied_addr.read() { "✓ คัดลอก address แล้ว" } else { "📋 คัดลอก address ของฉัน" }
+                                        }
+                                    }
                                 }
                                 div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;background:var(--surface);display:grid;gap:4px",
                                     span { style: "font-size:12px;color:var(--muted)", "💰 งบครัวเรือน" }
@@ -2320,7 +2367,32 @@ fn app() -> Element {
                                         if *copied_invite.read() { "✓ คัดลอกลิงก์เชิญแล้ว" } else { "คัดลอกลิงก์เชิญสมาชิก" }
                                     }
                                     p { style: "font-size:11px;color:var(--muted);margin:0",
-                                        "สมาชิกใหม่เปิดลิงก์ กดเข้าใช้งาน แล้วส่ง address ของเขากลับมา — คุณกด Add member ในโหมดขั้นสูง"
+                                        "สมาชิกใหม่เปิดลิงก์ กดเข้าใช้งาน แล้วกดปุ่มคัดลอก address ส่งมาให้คุณ — วางที่นี่เพื่อเพิ่มเข้าบ้าน"
+                                    }
+                                    div { style: "display:flex;gap:8px",
+                                        input {
+                                            style: "flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:8px;font-size:12px;min-width:0",
+                                            value: "{invite_addr}",
+                                            oninput: move |e| invite_addr.set(e.value()),
+                                            placeholder: "วาง address ที่สมาชิกส่งมาให้"
+                                        }
+                                        button {
+                                            style: "padding:10px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                                            disabled: action_busy() || invite_addr().trim().is_empty(),
+                                            onclick: move |_| {
+                                                let ctx = ctx;
+                                                let caller = wallet_pk;
+                                                match Pubkey::from_str(invite_addr().trim()) {
+                                                    Ok(new_member) => {
+                                                        if let Some(c) = caller {
+                                                            spawn(async move { ctx.do_add_member(&c, &new_member, 3).await; });
+                                                        }
+                                                    }
+                                                    Err(_) => action_msg.set("⚠ ที่อยู่ไม่ถูกต้อง — ลองวางใหม่อีกครั้ง".into()),
+                                                }
+                                            },
+                                            "เพิ่มสมาชิก"
+                                        }
                                     }
                                 }
                                 }
@@ -2347,6 +2419,7 @@ fn app() -> Element {
                                                             if let (Some(a), Some(c)) = (admin, caller) { ctx.do_approve(&a, &c, row.request_id).await; }
                                                         });
                                                     },
+                                                    disabled: action_busy(),
                                                     "✓ อนุมัติ"
                                                 }
                                                 button {
@@ -2358,6 +2431,7 @@ fn app() -> Element {
                                                             if let (Some(a), Some(c)) = (admin, caller) { ctx.do_reject(&a, &c, row.request_id, "ไม่อนุมัติจากหน้าหลัก").await; }
                                                         });
                                                     },
+                                                    disabled: action_busy(),
                                                     "✗ ไม่อนุมัติ"
                                                 }
                                             }
@@ -2428,6 +2502,7 @@ fn app() -> Element {
                                                         if let (Some(o), Some(b)) = (owner, buyer) { ctx.do_confirm(&o, &b, row.request_id).await; }
                                                     });
                                                 },
+                                                disabled: action_busy(),
                                                 "ฉันซื้อแล้ว ✓"
                                             }
                                         }
@@ -2444,6 +2519,7 @@ fn app() -> Element {
                                                         if let (Some(o), Some(c)) = (owner, caller) { ctx.do_reimburse(&o, &c, &buyer, row.request_id, amt).await; }
                                                     });
                                                 },
+                                                disabled: action_busy(),
                                                 "จ่ายเงินคืน"
                                             }
                                         }
@@ -2451,6 +2527,16 @@ fn app() -> Element {
                                 }
                             },
                             ViewMode::Lists => rsx! {
+                                if other_rows.is_empty() && pending_rows.is_empty() {
+                                    div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:20px;display:grid;gap:8px;justify-items:center;background:var(--surface)",
+                                        span { style: "font-size:13px;color:var(--muted)", "ยังไม่มีรายการ 🧾" }
+                                        button {
+                                            style: "padding:8px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
+                                            onclick: move |_| view_mode.set(ViewMode::Home),
+                                            "ถ่ายใบเสร็จที่หน้าแรก →"
+                                        }
+                                    }
+                                }
                                 for row in other_rows {
                                     div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px;margin-bottom:10px",
                                         div { style: "display:flex;justify-content:space-between;gap:8px",
@@ -2477,6 +2563,19 @@ fn app() -> Element {
                                         if chat.len() == 0 {
                                             p { style: "font-size:12px;color:var(--faint);margin:0",
                                                 "พิมพ์อะไรก็ได้ เช่น “ซื้อนม 2 ขวด งบ 50 บาท” — ผมช่วยเปิดคำขอให้เลย" }
+                                            div { style: "display:flex;flex-wrap:wrap;gap:6px",
+                                                for q in ["งบเหลือเท่าไหร่", "สรุปรายการที่รออนุมัติ", "ซื้อข้าว 2 กิโล งบ 100 บาท"] {
+                                                    button {
+                                                        style: "padding:6px 12px;border:1px solid var(--border-strong);border-radius:9999px;background:var(--surface-2);color:var(--ink-soft);font-size:12px;cursor:pointer",
+                                                        disabled: chat_busy(),
+                                                        onclick: move |_| {
+                                                            chat_input.set(q.to_string());
+                                                            spawn(send_chat_msg(chat, chat_input, chat_busy, state, ledger));
+                                                        },
+                                                        "{q}"
+                                                    }
+                                                }
+                                            }
                                         }
                                         for msg in chat() {
                                             div {
@@ -2528,8 +2627,21 @@ fn app() -> Element {
                         }
                     },
                 }}
+                // ผลลัพธ์ของทุก action (อนุมัติ/จ่ายคืน/เพิ่มสมาชิก) — เดิม
+                // action_msg ถูก set แต่โหมดบ้านไม่เคยแสดงเลย
+                if !action_msg().is_empty() {
+                    div {
+                        class: if action_msg().starts_with("✓") { "banner banner-ok" } else { "banner banner-err" },
+                        "{action_msg}"
+                    }
+                }
                 div { class: "tabbar",
-                    button { class: if *view_mode.read() == ViewMode::Home { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Home), "🏠\nหน้าแรก" }
+                    button { class: if *view_mode.read() == ViewMode::Home { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Home),
+                        if pending_n > 0 {
+                            span { style: "display:inline-block;min-width:18px;padding:1px 7px;margin-right:4px;border-radius:9999px;background:var(--danger);color:white;font-size:11px;font-weight:700", "{pending_n}" }
+                        }
+                        "🏠\nหน้าแรก"
+                    }
                     button { class: if *view_mode.read() == ViewMode::Lists { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Lists), "📋\nรายการ" }
                     button { class: if *view_mode.read() == ViewMode::Assistant { "active" } else { "" }, onclick: move |_| view_mode.set(ViewMode::Assistant), "🤖\nผู้ช่วย" }
                     button { onclick: move |_| advanced_mode.set(true), "⚙️\nขั้นสูง" }
