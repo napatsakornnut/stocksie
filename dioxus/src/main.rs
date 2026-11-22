@@ -699,6 +699,8 @@ struct Ctx {
     contacts: Signal<Vec<Contact>>,
     members: Signal<Vec<MemberView>>,
     item_texts: Signal<Vec<(u64, String)>>,
+    /// โหมดบ้านตัวอย่าง — refresh แบบนี้ไม่ควรจำเป็น "บ้านเดิม" ของเครื่อง
+    demo_mode: Signal<bool>,
 }
 
 impl Ctx {
@@ -716,6 +718,15 @@ impl Ctx {
             Ok(v) => {
                 let key = v.pda_key;
                 state.set(FetchState::Loaded(Box::new(v)));
+                // จำบ้านล่าสุดของเครื่องนี้ (ข้ามโหมดตัวอย่าง)
+                if !*self.demo_mode.read() {
+                    if let Some(store) = web_sys::window()
+                        .and_then(|w| w.local_storage().ok())
+                        .flatten()
+                    {
+                        let _ = store.set_item("stocksie-last-owner", &owner_raw);
+                    }
+                }
                 // members + on-device caches (contacts, item texts)
                 members.set(fetch_members(&key).await.unwrap_or_default());
                 contacts.set(load_contacts(&key.to_string()));
@@ -902,9 +913,20 @@ fn app() -> Element {
     // เติมเงินเข้าบ้าน (พิมพ์เป็นบาท) + ลิงก์ยืนยันสมาชิก (?owner=&add=)
     let mut deposit_baht = use_signal(String::new);
     let mut add_confirm = use_signal(|| None::<String>);
+    // บ้านตัวอย่างแบบอ่านอย่างเดียว (ไม่ต้องมีกระเป๋าเงิน) + ชิปกรองในแท็บรายการ
+    let mut demo_mode = use_signal(|| false);
+    let mut list_filter = use_signal(|| 0u8);
     let mut contacts = use_signal(Vec::new);
     let mut members = use_signal(Vec::new);
     let mut item_texts = use_signal(Vec::new);
+    // จำบ้านล่าสุดของเครื่องนี้ (stocksie-last-owner) — คนกลับมาไม่หลงทาง
+    let last_owner = use_signal(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .flatten()
+            .and_then(|s| s.get_item("stocksie-last-owner").ok().flatten())
+            .filter(|s| !s.is_empty())
+    });
     let ctx = Ctx {
         action_msg,
         action_busy,
@@ -913,6 +935,7 @@ fn app() -> Element {
         contacts,
         members,
         item_texts,
+        demo_mode,
     };
     // theme: "system" | "light" | "dark" (persisted in localStorage)
     let mut theme_mode = use_signal(|| {
@@ -956,6 +979,7 @@ fn app() -> Element {
                 Ok(provider) => match wallet::connect(&provider).await {
                     Ok(pk) => {
                         wallet_pubkey.set(Some(pk.clone()));
+                        demo_mode.set(false);
                         ctx.refresh(pk).await;
                     }
                     Err(e) => wallet_error.set(Some(e)),
@@ -2253,6 +2277,89 @@ fn app() -> Element {
                     h1 { style: "font-size:20px;margin:0", "🏠 บ้านของเรา" }
                 }
                 {match (wallet_pubkey().clone(), state().clone()) {
+                    // บ้านตัวอย่าง — อ่านอย่างเดียว ไม่ต้องมีกระเป๋าเงิน
+                    (None, _) if *demo_mode.read() => match &*state.read() {
+                        FetchState::Loading => rsx! { p { style: "color:var(--faint);font-size:14px", "กำลังโหลดบ้านตัวอย่าง…" } },
+                        FetchState::Failed(e) => rsx! {
+                            div { class: "banner banner-err", "⚠ {e}" }
+                            button {
+                                style: "padding:8px 14px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--ink-soft);font-weight:600;cursor:pointer;width:fit-content",
+                                onclick: move |_| demo_mode.set(false),
+                                "กลับหน้าแรก"
+                            }
+                        },
+                        FetchState::Loaded(v) => {
+                            let thb_balance = v.lamports_sol.parse::<f64>().unwrap_or(0.0) * sol_thb();
+                            let texts = item_texts();
+                            let pending_rows: Vec<_> = match &*ledger.read() {
+                                LedgerState::Loaded(rows) => rows.iter().filter(|r| r.status == "waiting").cloned().collect(),
+                                _ => Vec::new(),
+                            };
+                            let other_rows: Vec<_> = match &*ledger.read() {
+                                LedgerState::Loaded(rows) => rows.iter().filter(|r| r.status != "waiting").cloned().collect(),
+                                _ => Vec::new(),
+                            };
+                            rsx! {
+                                div { class: "banner banner-ok", style: "display:grid;gap:8px",
+                                    span { "👀 โหมดตัวอย่าง — ข้อมูลจริงจาก devnet แบบอ่านอย่างเดียว ไม่ใช้เงิน ไม่ต้องมีกระเป๋าเงิน" }
+                                    button {
+                                        style: "padding:8px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer;width:fit-content",
+                                        onclick: move |_| demo_mode.set(false),
+                                        "ใช้ของจริง — เชื่อมกระเป๋าเงิน"
+                                    }
+                                }
+                                div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;background:var(--surface);display:grid;gap:4px",
+                                    span { style: "font-size:12px;color:var(--muted)", "💰 งบครัวเรือน (ตัวอย่าง)" }
+                                    span { style: "font-size:34px;font-weight:700", "฿{thb_balance:.2}" }
+                                    span { style: "font-size:12px;color:var(--faint)", "≈ {v.lamports_sol} SOL · สมาชิก {v.member_count} คน" }
+                                }
+                                div { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px",
+                                    for m in members() {
+                                        div { style: "display:flex;gap:6px;align-items:center;padding:6px 10px;border-radius:9999px;border:1px solid var(--border);background:var(--surface)",
+                                            span { "{role_emoji(m.role_tag)}" }
+                                            span { style: "font-size:12px", "{contact_name(&m.wallet, &contacts(), &members())}" }
+                                        }
+                                    }
+                                }
+                                h2 { style: "margin:24px 0 8px;font-size:16px", "📋 รออนุมัติ ({pending_rows.len()})" }
+                                if pending_rows.is_empty() {
+                                    p { style: "color:var(--faint);font-size:13px", "ไม่มีคำขอรออนุมัติ — สบายใจได้ :)" }
+                                }
+                                for row in pending_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:8px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:14px;font-weight:700", "฿{row_amount_thb(&row.amount_sol, sol_thb()):.2}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "ขอโดย {contact_name(&row.buyer_key, &contacts(), &members())}" }
+                                        if steps_done(&row.status) > 0 {
+                                            div { style: "display:flex;gap:8px;font-size:10px;flex-wrap:wrap",
+                                                for (i, name) in ["ขอ", "อนุมัติ", "ซื้อ", "จ่ายคืน"].iter().enumerate() {
+                                                    span {
+                                                        style: if (i as usize) < steps_done(&row.status) { "color:var(--accent);font-weight:700" } else { "color:var(--faint)" },
+                                                        if (i as usize) < steps_done(&row.status) { "✓{name}" } else { "{name}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                h2 { style: "margin:24px 0 8px;font-size:16px", "🗂 รายการที่ผ่านแล้ว ({other_rows.len()})" }
+                                for row in other_rows {
+                                    div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px",
+                                        div { style: "display:flex;justify-content:space-between;gap:8px",
+                                            span { style: "font-size:14px;font-weight:600", "{item_text_of(&texts, row.request_id)}" }
+                                            span { style: "font-size:12px;padding:2px 8px;border-radius:9999px {status_style(row.status)}", "{status_thai(row.status)}" }
+                                        }
+                                        span { style: "font-size:12px;color:var(--muted)", "฿{row_amount_thb(&row.amount_sol, sol_thb()):.2} · ผู้ซื้อ {contact_name(&row.buyer_key, &contacts(), &members())}" }
+                                    }
+                                }
+                                p { style: "font-size:11px;color:var(--faint);margin-top:16px",
+                                    "ชอบไหม? เชื่อมกระเป๋าเงินแล้วสร้างบ้านของคุณเองได้เลย — ฟรีทั้งหมดบนระบบทดลอง" }
+                            }
+                        }
+                        FetchState::Idle => rsx! { p { style: "color:var(--faint);font-size:14px", "กำลังโหลด…" } },
+                    },
                     (None, _) => rsx! {
                         div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
                             p { style: "margin:0;font-size:14px", "ยินดีต้อนรับ 👋" }
@@ -2274,12 +2381,36 @@ fn app() -> Element {
                                 disabled: *wallet_busy.read(),
                                 if *wallet_busy.read() { "Connecting…" } else { "เข้าใช้งานด้วยกระเป๋าเงิน" }
                             }
+                            button {
+                                style: "padding:8px 14px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--ink-soft);font-weight:600;cursor:pointer;width:fit-content",
+                                onclick: move |_| {
+                                    demo_mode.set(true);
+                                    owner_input.set(DEMO_OWNERS[0].0.to_string());
+                                    spawn(async move { ctx.refresh(DEMO_OWNERS[0].0.to_string()).await; });
+                                },
+                                "👀 ลองดูบ้านตัวอย่างก่อน (ไม่ต้องมีกระเป๋าเงิน)"
+                            }
                         }
                     },
                     (Some(_), FetchState::Loading) => rsx! { p { style: "color:var(--faint);font-size:14px", "กำลังโหลด…" } },
-                    (Some(_), FetchState::Failed(msg)) => rsx! {
-                        div { class: "banner banner-err", "⚠ {msg}" }
-                        p { style: "color:var(--muted);font-size:13px", "ใส่ address เจ้าบ้านในโหมดขั้นสูง ⚙️ แล้วกด Load household" }
+                    (Some(_), FetchState::Failed(msg)) => {
+                        let prev = last_owner().clone();
+                        rsx! {
+                            div { class: "banner banner-err", "⚠ {msg}" }
+                            p { style: "color:var(--muted);font-size:13px", "ใส่ address เจ้าบ้านในโหมดขั้นสูง ⚙️ แล้วกด Load household" }
+                            if let Some(p) = prev {
+                                button {
+                                    style: "padding:10px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer;width:fit-content",
+                                    onclick: move |_| {
+                                        owner_input.set(p.clone());
+                                        joined_from.set(Some(p.clone()));
+                                        let o = p.clone();
+                                        spawn(async move { ctx.refresh(o).await; });
+                                    },
+                                    "🏠 เข้าบ้านเดิม ({short_addr(&p)})"
+                                }
+                            }
+                        }
                     },
                     (Some(_), FetchState::Idle) => rsx! {
                         div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
@@ -2628,17 +2759,45 @@ fn app() -> Element {
                                     }
                                 }
                             },
-                            ViewMode::Lists => rsx! {
-                                if other_rows.is_empty() && pending_rows.is_empty() {
-                                    div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:20px;display:grid;gap:8px;justify-items:center;background:var(--surface)",
-                                        span { style: "font-size:13px;color:var(--muted)", "ยังไม่มีรายการ 🧾" }
+                            ViewMode::Lists => {
+                                let done_n = other_rows.len();
+                                let wait_n = pending_rows.len();
+                                let chip_all = format!("ทั้งหมด ({})", wait_n + done_n);
+                                let chip_wait = format!("รออนุมัติ ({wait_n})");
+                                let chip_done = format!("เสร็จแล้ว ({done_n})");
+                                let any_shown = (list_filter() != 1 && done_n > 0) || (list_filter() != 2 && wait_n > 0);
+                                rsx! {
+                                    div { style: "display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap",
                                         button {
-                                            style: "padding:8px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
-                                            onclick: move |_| view_mode.set(ViewMode::Home),
-                                            "ถ่ายใบเสร็จที่หน้าแรก →"
+                                            style: if list_filter() == 0 { "padding:6px 12px;border:1px solid var(--accent);border-radius:9999px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer" } else { "padding:6px 12px;border:1px solid var(--border-strong);border-radius:9999px;background:var(--surface);color:var(--ink-soft);font-size:12px;cursor:pointer" },
+                                            onclick: move |_| list_filter.set(0),
+                                            "{chip_all}"
+                                        }
+                                        button {
+                                            style: if list_filter() == 1 { "padding:6px 12px;border:1px solid var(--accent);border-radius:9999px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer" } else { "padding:6px 12px;border:1px solid var(--border-strong);border-radius:9999px;background:var(--surface);color:var(--ink-soft);font-size:12px;cursor:pointer" },
+                                            onclick: move |_| list_filter.set(1),
+                                            "{chip_wait}"
+                                        }
+                                        button {
+                                            style: if list_filter() == 2 { "padding:6px 12px;border:1px solid var(--accent);border-radius:9999px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer" } else { "padding:6px 12px;border:1px solid var(--border-strong);border-radius:9999px;background:var(--surface);color:var(--ink-soft);font-size:12px;cursor:pointer" },
+                                            onclick: move |_| list_filter.set(2),
+                                            "{chip_done}"
                                         }
                                     }
-                                }
+                                    if !any_shown {
+                                        div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:20px;display:grid;gap:8px;justify-items:center;background:var(--surface)",
+                                            span {
+                                                style: "font-size:13px;color:var(--muted)",
+                                                if list_filter() == 1 { "ไม่มีคำขอรออนุมัติ — สบายใจได้ :)" } else { "ยังไม่มีรายการ 🧾" }
+                                            }
+                                            button {
+                                                style: "padding:8px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
+                                                onclick: move |_| view_mode.set(ViewMode::Home),
+                                                "ถ่ายใบเสร็จที่หน้าแรก →"
+                                            }
+                                        }
+                                    }
+                                    if list_filter() != 1 {
                                 for row in other_rows {
                                     div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px;margin-bottom:10px",
                                         div { style: "display:flex;justify-content:space-between;gap:8px",
@@ -2658,6 +2817,8 @@ fn app() -> Element {
                                         }
                                     }
                                 }
+                                }
+                                if list_filter() != 2 {
                                 for row in pending_rows {
                                     div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:6px;margin-bottom:10px",
                                         div { style: "display:flex;justify-content:space-between;gap:8px",
@@ -2677,6 +2838,8 @@ fn app() -> Element {
                                         }
                                     }
                                 }
+                                }
+                            }
                             },
                             ViewMode::Assistant => rsx! {
                                 div { style: "border:1px solid var(--border-strong);border-radius:12px;padding:16px;display:grid;gap:10px",
