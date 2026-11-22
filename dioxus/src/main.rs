@@ -42,7 +42,19 @@ const PROGRAM_ID: &str = "At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj";
 /// from origins listed in AI_ALLOWED_ORIGINS on the server — see
 /// app/src/app/api/ai/route.ts. Point this at the hosted URL to reuse that
 /// deployment instead of a local dev server.
-const AI_API_URL: &str = "https://stocksie-th.vercel.app/api/ai";
+/// AI route — same-origin Pages Function on Cloudflare (functions/api/ai.js);
+/// falls back to the Next.js deployment for local static-server testing.
+fn ai_api_url() -> String {
+    let same_origin = web_sys::window()
+        .and_then(|w| w.location().origin().ok())
+        .map(|o| !(o.contains("localhost") || o.contains("127.0.0.1")))
+        .unwrap_or(true);
+    if same_origin {
+        "/api/ai".to_string()
+    } else {
+        "https://stocksie-th.vercel.app/api/ai".to_string()
+    }
+}
 
 /// Devnet JSON-RPC endpoint (the prototype targets devnet like the hosted app).
 const RPC_URL: &str = "https://api.devnet.solana.com";
@@ -212,7 +224,7 @@ async fn send_chat_msg(
             "recentRequests": recent,
         }
     });
-    match post_json(AI_API_URL, body).await {
+    match post_json(&ai_api_url(), body).await {
         Ok(v) => {
             let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
             let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
@@ -1522,7 +1534,7 @@ fn app() -> Element {
                     "mimeType": if mime.is_empty() { "image/png".to_string() } else { mime },
                 }
             });
-            match post_json(AI_API_URL, body).await {
+            match post_json(&ai_api_url(), body).await {
                 Ok(v) => {
                     let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
                     let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
