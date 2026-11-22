@@ -2822,21 +2822,54 @@ async fn rpc_call(body: serde_json::Value) -> Result<serde_json::Value, String> 
     })
 }
 
-/// POST a JSON body anywhere and parse the JSON reply.
+/// POST a JSON body anywhere and parse the JSON reply — with automatic retry
+/// (2 retries, backoff) for transient devnet failures (429 / NetworkError).
+/// Errors map to friendly Thai for the UI.
 async fn post_json(url: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
-    let resp = Request::post(url)
-        .json(&body)
-        .map_err(|e| format!("body encode failed: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("request to {url} failed: {e}"))?;
-    if resp.status() != 200 {
-        return Err(format!("{} returned HTTP {}", url, resp.status()));
-    }
-    let text = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("bad JSON from {url}: {e}"))
+    let mut last_err = String::new();
+    let mut attempt = 0;
+    let resp = loop {
+        if attempt > 0 {
+            gloo_timers::future::TimeoutFuture::new(800 * (attempt as u32)).await;
+        }
+        let built = match Request::post(url).json(&body) {
+            Ok(r) => r,
+            Err(e) => return Err(format!("body encode failed: {e}")),
+        };
+        let sent = built.send().await;
+        match sent {
+            Err(e) => {
+                last_err = format!("เครือข่ายติดขัด — ลองอีกครั้งในอีกสักครู่ ({e})");
+            }
+            Ok(resp) if resp.status() == 429 => {
+                last_err = "devnet ติดขัด (rate limit) — ลองอีกครั้งในอีกสักครู่".into();
+            }
+            Ok(resp) if resp.status() != 200 => {
+                return Err(format!("{} returned HTTP {}", url, resp.status()));
+            }
+            Ok(resp) => {
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("read failed: {e}"))?;
+                let parsed: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("bad JSON from {url}: {e}"))?;
+                break parsed;
+            }
+        }
+        attempt += 1;
+        if attempt >= 3 {
+            return Err(last_err);
+        }
+    };
+    let result = match &resp {
+        v if v.get("error").is_some() => {
+            return Err(format!("devnet RPC error: {}", v["error"]));
+        }
+        v => v.clone(),
+    };
+    Ok(result)
 }
-
 /// getAccountInfo with base64 encoding — returns the full result envelope
 /// (`{ context, value: account | null }`), NOT the bare account.
 async fn rpc_get_account(pubkey: &Pubkey) -> Result<serde_json::Value, String> {
