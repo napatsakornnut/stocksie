@@ -2354,6 +2354,49 @@ fn app() -> Element {
                                         }
                                     }
                                 }
+                                div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:14px;display:grid;gap:10px",
+                                    div { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center",
+                                        input {
+                                            r#type: "file",
+                                            id: "receipt-file",
+                                            accept: "image/png,image/jpeg,image/webp",
+                                            style: "font-size:12px",
+                                        }
+                                        button {
+                                            style: "padding:8px 14px;border:none;border-radius:8px;background:var(--teal);color:white;font-weight:600;cursor:pointer",
+                                            onclick: parse_receipt,
+                                            disabled: *receipt_state.read() == "loading",
+                                            if *receipt_state.read() == "loading" { "Reading…" } else { "Extract items" }
+                                        }
+                                        span { style: "font-size:11px;color:var(--muted)",
+                                            "1 SOL ≈ ฿{sol_thb():.0}"
+                                        }
+                                    }
+                                    match &*receipt_state.read() {
+                                        s if s == "idle" => rsx! { p { style: "font-size:12px;color:var(--faint);margin:0", "ถ่ายใบเสร็จแล้วให้ AI แตกเป็นรายการ — กดเปิดคำขอได้เลย" } },
+                                        s if s == "loading" => rsx! { p { style: "font-size:12px;color:var(--faint);margin:0", "กำลังอ่านใบเสร็จ…" } },
+                                        s if s.starts_with("error:") => {
+                                            let msg = s.trim_start_matches("error:");
+                                            rsx! { p { style: "font-size:12px;color:var(--danger);margin:0", "⚠ {msg}" } }
+                                        },
+                                        _success => rsx! {
+                                            p { style: "font-size:12px;color:var(--success);margin:0", "✓ แตกได้ {receipt_items().len()} รายการ — กดเปิดคำขอทีละรายการ" }
+                                        },
+                                    }
+                                    for item in receipt_items() {
+                                        div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid var(--border);border-radius:8px;padding:8px 10px",
+                                            span { style: "flex:1;font-size:13px", "{item.name}" }
+                                            span { style: "font-size:12px;color:var(--muted)", "×{item.quantity}" }
+                                            span { style: "font-size:12px;font-family:ui-monospace,monospace", "{item.price_label()}" }
+                                            button {
+                                                style: "padding:6px 12px;border:none;border-radius:8px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer",
+                                                onclick: move |_| open_from_receipt(item.clone()),
+                                                disabled: action_busy() || wallet_pubkey().is_none(),
+                                                "Open request"
+                                            }
+                                        }
+                                    }
+                                }
                                 h2 { style: "margin:24px 0 8px;font-size:16px", "✅ กำลังดำเนินการ / เสร็จแล้ว" }
                                 for row in other_rows {
                                     div { style: "border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface);display:grid;gap:8px",
