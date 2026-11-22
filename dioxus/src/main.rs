@@ -42,7 +42,7 @@ const PROGRAM_ID: &str = "At2vd5Mqd9xcHRFAZin1VHb6upEsF1GCXoFG19UHsQoj";
 /// from origins listed in AI_ALLOWED_ORIGINS on the server — see
 /// app/src/app/api/ai/route.ts. Point this at the hosted URL to reuse that
 /// deployment instead of a local dev server.
-const AI_API_URL: &str = "http://localhost:3000/api/ai";
+const AI_API_URL: &str = "https://stocksie-th.vercel.app/api/ai";
 
 /// Devnet JSON-RPC endpoint (the prototype targets devnet like the hosted app).
 const RPC_URL: &str = "https://api.devnet.solana.com";
