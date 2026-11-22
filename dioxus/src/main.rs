@@ -2209,6 +2209,11 @@ fn app() -> Element {
                         div { style: "border:1px solid var(--border-strong);border-radius:14px;padding:20px;display:grid;gap:10px;background:var(--surface)",
                             p { style: "margin:0;font-size:14px", "ยินดีต้อนรับ 👋" }
                             p { style: "margin:0;font-size:12px;color:var(--muted)", "1️⃣ เชื่อมกระเป๋าเงินเพื่อเริ่มใช้งาน" }
+                            if let Some(err) = &*wallet_error.read() {
+                                p { style: "margin:0;font-size:12px;color:var(--danger)",
+                                    "⚠ ยังไม่พบกระเป๋าเงินในเบราว์เซอร์นี้ — ติดตั้ง Phantom จาก phantom.app แล้วลองอีกครั้ง"
+                                }
+                            }
                             button {
                                 style: "padding:10px 14px;border:none;border-radius:8px;background:var(--violet);color:white;font-weight:600;cursor:pointer",
                                 onclick: connect_wallet,
@@ -2279,8 +2284,9 @@ fn app() -> Element {
                                     }
                                 }
                                 if let LedgerState::Failed(e) = &*ledger.read() {
-                                    div { class: "banner banner-err", "⚠ โหลดรายการไม่สำเร็จ ({e}) — ลองปิดหน้าแล้วเปิดใหม่" }
+                                    div { class: "banner banner-err", "⚠ โหลดรายการจาก devnet ไม่สำเร็จ (เครือข่ายติดขัด) — รอสักครู่แล้วสลับแท็บกลับมาดูใหม่" }
                                 }
+                                if can_approve {
                                 div { style: "border:1px dashed var(--border-strong);border-radius:12px;padding:14px;display:grid;gap:8px",
                                     span { style: "font-size:13px;font-weight:600", "🔗 เชิญสมาชิกเข้าบ้าน" }
                                     button {
@@ -2304,6 +2310,7 @@ fn app() -> Element {
                                     p { style: "font-size:11px;color:var(--muted);margin:0",
                                         "สมาชิกใหม่เปิดลิงก์ กดเข้าใช้งาน แล้วส่ง address ของเขากลับมา — คุณกด Add member ในโหมดขั้นสูง"
                                     }
+                                }
                                 }
                                 h2 { style: "margin:24px 0 8px;font-size:16px", "📋 รออนุมัติ ({pending_rows.len()})" }
                                 if pending_rows.is_empty() {
@@ -2474,8 +2481,12 @@ fn app() -> Element {
                 }
             }
             footer { style: "margin-top:40px;color:var(--faint);font-size:11px;border-top:1px solid var(--border);padding-top:12px",
-                "Privacy note: the household name never lands on-chain — the contract stores a blake3 fingerprint only, decoded here as hex. "
-                "Program: " {PROGRAM_ID}
+                if *advanced_mode.read() {
+                    "Privacy note: the household name never lands on-chain — the contract stores a blake3 fingerprint only, decoded here as hex. "
+                    "Program: " {PROGRAM_ID}
+                } else {
+                    "Stocksie — ครัวเรือนของคุณบน Solana 🔷 โหมดขั้นสูงมีรายละเอียดเทคนิค"
+                }
             }
         }
     }
