@@ -2766,7 +2766,15 @@ fn app() -> Element {
                                 let chip_wait = format!("รออนุมัติ ({wait_n})");
                                 let chip_done = format!("เสร็จแล้ว ({done_n})");
                                 let any_shown = (list_filter() != 1 && done_n > 0) || (list_filter() != 2 && wait_n > 0);
+                                let total_baht: f64 = other_rows.iter().map(|r| row_amount_thb(&r.amount_sol, sol_thb())).sum();
+                                let wait_baht: f64 = pending_rows.iter().map(|r| row_amount_thb(&r.amount_sol, sol_thb())).sum();
                                 rsx! {
+                                    div { style: "display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px",
+                                        span { style: "font-size:13px;font-weight:700", "ใช้ไปแล้ว ฿{total_baht:.2}" }
+                                        if wait_baht > 0.0 {
+                                            span { style: "font-size:12px;color:var(--muted)", "รออนุมัติอีก ฿{wait_baht:.2}" }
+                                        }
+                                    }
                                     div { style: "display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap",
                                         button {
                                             style: if list_filter() == 0 { "padding:6px 12px;border:1px solid var(--accent);border-radius:9999px;background:var(--accent);color:white;font-size:12px;font-weight:600;cursor:pointer" } else { "padding:6px 12px;border:1px solid var(--border-strong);border-radius:9999px;background:var(--surface);color:var(--ink-soft);font-size:12px;cursor:pointer" },
