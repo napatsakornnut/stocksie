@@ -457,10 +457,16 @@ const THEME_CSS: &str = r#"
         margin: 0;
         background: var(--bg);
         color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        /* Latin ใช้ฟอนต์ระบบ, ไทยร่วงไป Noto Sans Thai (โหลดผ่าน deploy script) */
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Noto Sans", sans-serif;
         -webkit-font-smoothing: antialiased;
+        transition: background 0.2s ease;
     }
-    button { font-family: inherit; }
+    button { font-family: inherit; transition: transform 0.08s ease, filter 0.15s ease; }
+    button:active { transform: scale(0.97); }
+    @media (hover: hover) {
+        button:hover { filter: brightness(1.06); }
+    }
     button[disabled] { opacity: 0.45; cursor: not-allowed; }
     input, select, textarea { color: var(--text); background: var(--surface); border-color: var(--border-strong); }
     input::placeholder { color: var(--faint); }
@@ -508,7 +514,8 @@ const THEME_CSS: &str = r#"
     [id] { scroll-margin-top: 72px; }
 
     /* result banners */
-    .banner { padding: 10px 12px; border-radius: 8px; font-size: 12px; margin: 0; }
+    .banner { padding: 10px 12px; border-radius: 8px; font-size: 12px; margin: 0; animation: bannerIn 0.22s ease; }
+    @keyframes bannerIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
     .banner-ok {
         border: 1px solid var(--success-border); background: var(--success-bg); color: var(--success);
     }
@@ -527,13 +534,15 @@ const THEME_CSS: &str = r#"
     .tabbar {
         position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
         display: flex; background: var(--surface); border-top: 1px solid var(--border);
+        padding-bottom: env(safe-area-inset-bottom);
     }
     .tabbar button {
         flex: 1; padding: 10px 0 8px; border: none; background: none;
         color: var(--muted); font-size: 11px; cursor: pointer; white-space: pre-line;
     }
     .tabbar button.active { color: var(--accent); font-weight: 700; }
-    body { padding-bottom: 64px; }
+    /* 64px tabbar + iPhone home-indicator safe area (ต้องมี viewport-fit=cover) */
+    body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
     #chat-box { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
         padding: 10px; border: 1px solid var(--border); border-radius: 8px;
         background: var(--surface-3); }

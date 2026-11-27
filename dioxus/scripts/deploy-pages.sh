@@ -30,8 +30,9 @@ cat > "$STAGE/_headers" <<'EOF'
   Cache-Control: public, max-age=31536000, immutable
 EOF
 
-# PWA: inject manifest/theme-color/apple-touch + service-worker registration
-# (idempotent — dx regenerates index.html on every build)
+# PWA + SEO + fonts: inject into the dx-generated index.html (idempotent).
+# dx regenerates this file every build with title "dioxus | ⛺" — all real
+# metadata must be added here at stage time, never in the crate.
 python3 - "$STAGE/index.html" <<'EOF'
 import sys
 path = sys.argv[1]
@@ -43,12 +44,24 @@ if 'rel="manifest"' not in html:
             '<meta name="apple-mobile-web-app-capable" content="yes">'
             '<meta name="apple-mobile-web-app-status-bar-style" content="default">')
     html = html.replace("<head>", "<head>" + head, 1)
+html = html.replace("<title>dioxus | ⛺</title>",
+                    "<title>Stocksie — บ้านของเรา</title>"
+                    '<meta name="description" content="ครัวเรือนของคุณบน Solana — งบ ใบเสร็จ และการอนุมัติของครอบครัว">')
+if 'viewport-fit=cover' not in html:
+    html = html.replace('content="width=device-width, initial-scale=1"',
+                        'content="width=device-width, initial-scale=1, viewport-fit=cover"')
+if "Noto+Sans+Thai" not in html:
+    html = html.replace("<head>",
+        "<head>"
+        '<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap">', 1)
 if "serviceWorker" not in html:
     sw = ('<script>if("serviceWorker" in navigator){'
           'navigator.serviceWorker.register("/sw.js").catch(function(){})}</script>')
     html = html.replace("</body>", sw + "</body>", 1)
 open(path, "w", encoding="utf-8").write(html)
-print("PWA tags injected")
+print("PWA + SEO + font tags injected")
 EOF
 
 OLD_HASH=$(curl -s "https://$PROJECT.pages.dev/" | grep -o 'assets/[^"]*\.js' | head -1 || true)

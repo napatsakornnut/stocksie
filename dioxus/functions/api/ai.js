@@ -2,6 +2,27 @@
 // Port of app/src/app/api/ai/route.ts: receipt + chat modes against any
 // OpenAI-compatible endpoint. The key lives in Cloudflare Pages secrets:
 //   npx wrangler pages secret put AI_API_KEY --project-name stocksie-dioxus
+//
+// Abuse brakes (the key's quota is the crown jewel):
+//   - 20 req / 5 min per IP (isolate-memory bucket, best-effort per colo)
+//   - cross-origin POSTs (Origin host != request host) rejected
+//   - body ≤ 11 MB (receipt cap is 8 MB pre-base64), chat text ≤ 2000 chars
+const LIMIT = 20;
+const WINDOW = 5 * 60 * 1000;
+
+function rateLimited(ip) {
+  const buckets = (globalThis.__aiBuckets ||= new Map());
+  const now = Date.now();
+  const b = buckets.get(ip);
+  if (!b || b.resetAt < now) {
+    if (buckets.size > 5000) buckets.clear();
+    buckets.set(ip, { count: 1, resetAt: now + WINDOW });
+    return false;
+  }
+  b.count += 1;
+  return b.count > LIMIT;
+}
+
 export async function onRequestPost({ request, env }) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -11,6 +32,32 @@ export async function onRequestPost({ request, env }) {
   if (!env.AI_API_KEY) {
     return Response.json({ error: "AI_API_KEY not set on this Pages project" }, { status: 501, headers: cors });
   }
+
+  // same-origin only when the browser announces an origin (curl stays open)
+  const origin = request.headers.get("Origin");
+  if (origin) {
+    try {
+      const oHost = new URL(origin).host;
+      const here = new URL(request.url).host;
+      const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(oHost);
+      if (oHost !== here && !local) {
+        return Response.json({ error: "Cross-origin use is not allowed." }, { status: 403, headers: cors });
+      }
+    } catch {
+      return Response.json({ error: "Bad Origin header." }, { status: 400, headers: cors });
+    }
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  if (rateLimited(ip)) {
+    return Response.json({ error: "ใช้งานถี่เกินไป — ลองอีกครั้งในภายหลัง" }, { status: 429, headers: cors });
+  }
+
+  const len = Number(request.headers.get("Content-Length") || 0);
+  if (len > 11 * 1024 * 1024) {
+    return Response.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 8 MB)" }, { status: 413, headers: cors });
+  }
+
   const base = (env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
   const visionModel = env.AI_VISION_MODEL || "gpt-4o-mini";
   const textModel = env.AI_TEXT_MODEL || "gpt-4o-mini";
@@ -24,6 +71,9 @@ export async function onRequestPost({ request, env }) {
   const mode = body.mode;
   if (mode !== "receipt" && mode !== "chat") {
     return Response.json({ error: "mode must be receipt or chat" }, { status: 400, headers: cors });
+  }
+  if (mode === "chat" && typeof body.text === "string" && body.text.length > 2000) {
+    return Response.json({ error: "ข้อความยาวเกินไป (สูงสุด 2000 ตัวอักษร)" }, { status: 413, headers: cors });
   }
 
   const system =
